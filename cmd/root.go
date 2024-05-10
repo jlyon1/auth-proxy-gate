@@ -30,6 +30,8 @@ var rootCmd = &cobra.Command{
 		redirect := viper.GetString("redirect")
 		clientID := viper.GetString("clientid")
 
+		proxy := viper.GetString("proxy")
+
 		logger, _ := zap.NewDevelopment()
 		log := logger.Sugar()
 
@@ -39,6 +41,7 @@ var rootCmd = &cobra.Command{
 			RedirectURI:  redirect,
 			ClientSecret: secret,
 			ClientID:     clientID,
+			Proxy: proxy
 		}
 
 		err := api.ListenAndServe(log)
@@ -85,4 +88,7 @@ func init() {
 
 	rootCmd.Flags().String("clientid", "", "Client ID")
 	viper.BindPFlag("clientid", rootCmd.Flags().Lookup("clientid"))
+
+	rootCmd.Flags().String("proxy", "", "Proxy URL")
+	viper.BindPFlag("proxy", rootCmd.Flags().Lookup("proxy"))
 }

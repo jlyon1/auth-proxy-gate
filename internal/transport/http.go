@@ -23,6 +23,7 @@ type Http struct {
 	ClientID     string `json:"ClientID"`
 	ClientSecret string `json:"ClientSecret"`
 	RedirectURI  string `json:"RedirectURI"`
+	Proxy        string `json:"Proxy"`
 }
 
 func (h *Http) ListenAndServe(log *zap.SugaredLogger) error {
@@ -43,7 +44,7 @@ func (h *Http) ListenAndServe(log *zap.SugaredLogger) error {
 		google.New(h.ClientID, h.ClientSecret, h.RedirectURI, "email"),
 	)
 
-	url, _ := url.Parse("https://geocode.lyonsoftworks.com")
+	url, _ := url.Parse(h.Proxy)
 	p := httputil.NewSingleHostReverseProxy(url)
 
 	r.HandleFunc("/*", func(writer http.ResponseWriter, request *http.Request) {
