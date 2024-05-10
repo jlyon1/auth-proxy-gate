@@ -41,7 +41,7 @@ var rootCmd = &cobra.Command{
 			RedirectURI:  redirect,
 			ClientSecret: secret,
 			ClientID:     clientID,
-			Proxy: proxy
+			Proxy:        proxy,
 		}
 
 		err := api.ListenAndServe(log)
