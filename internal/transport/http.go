@@ -29,8 +29,6 @@ type Http struct {
 
 func (h *Http) ListenAndServe(log *zap.SugaredLogger) error {
 	r := chi.NewRouter()
-
-	key := ""            // Replace with your SESSION_SECRET or similar
 	key := h.SecretKey
 	maxAge := 86400 * 30 // 30 days
 
