@@ -2,6 +2,7 @@ package transport
 
 import (
 	"context"
+	"errors"
 	"git.lyonsoftworks.com/jlyon1/auth-proxy-gate/internal/readable"
 	"git.lyonsoftworks.com/jlyon1/auth-proxy-gate/internal/transport/ui"
 	"github.com/a-h/templ"
@@ -28,10 +29,10 @@ type Http struct {
 	Proxy        string `json:"Proxy"`
 	SecretKey    string `json:"SecretKey"`
 
-	DB bolt.DB
+	DB bolt.DB // TODO: This struct needs a NewFunc
 }
 
-func (h *Http) ListenAndServe(log *zap.SugaredLogger) error {
+func (h *Http) ListenAndServe(log *zap.SugaredLogger, ctx context.Context) error {
 	r := chi.NewRouter()
 	key := h.SecretKey
 	maxAge := 86400 * 30 // 30 days
@@ -127,5 +128,22 @@ func (h *Http) ListenAndServe(log *zap.SugaredLogger) error {
 
 	log.Infof("Listening on %s", h.ListenURL)
 
-	return http.ListenAndServe(h.ListenURL, r)
+	server := http.Server{
+		Addr:    h.ListenURL,
+		Handler: r,
+	}
+
+	go func() {
+		<-ctx.Done()
+		if err := server.Close(); err != nil {
+			log.Fatalf("HTTP close error: %v", err)
+		}
+	}()
+
+	if err := server.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
+		log.Fatalf("HTTP server error: %v", err)
+		return err
+	}
+
+	return nil
 }

@@ -4,10 +4,15 @@ Copyright © 2024 NAME HERE <EMAIL ADDRESS>
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"git.lyonsoftworks.com/jlyon1/auth-proxy-gate/internal/transport"
+	bolt "go.etcd.io/bbolt"
 	"go.uber.org/zap"
 	"os"
+	"os/signal"
+	"sync"
+	"syscall"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -36,6 +41,16 @@ var rootCmd = &cobra.Command{
 		logger, _ := zap.NewDevelopment()
 		log := logger.Sugar()
 
+		db, err := bolt.Open("./sessions.db", 0600, nil)
+		if err != nil {
+			log.Error("error creating bolt db", err)
+		}
+
+		defer db.Close()
+		defer func() {
+			log.Info("Graceful shutdown complete")
+		}()
+
 		api := transport.Http{
 			ListenURL:    fmt.Sprintf("%s:%d", host, port),
 			Secure:       secure,
@@ -44,13 +59,34 @@ var rootCmd = &cobra.Command{
 			ClientID:     clientID,
 			Proxy:        proxy,
 			SecretKey:    secretKey,
-		}
 
-		err := api.ListenAndServe(log)
-
-		if err != nil {
-			os.Exit(1)
+			DB: *db,
 		}
+		wg := sync.WaitGroup{}
+
+		ctx, cancel := context.WithCancel(context.Background())
+
+		wg.Add(1)
+		go func() {
+			err = api.ListenAndServe(log, ctx)
+
+			if err != nil {
+				log.Error(err)
+			}
+
+			wg.Done()
+
+		}()
+
+		sigChan := make(chan os.Signal, 1)
+		signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+		<-sigChan
+		log.Info("Shutdown called... stopping")
+		cancel()
+
+		wg.Wait()
+
+		log.Info("done")
 
 	},
 }
