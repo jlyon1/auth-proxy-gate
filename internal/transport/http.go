@@ -24,12 +24,14 @@ type Http struct {
 	ClientSecret string `json:"ClientSecret"`
 	RedirectURI  string `json:"RedirectURI"`
 	Proxy        string `json:"Proxy"`
+	SecretKey    string `json:"SecretKey"`
 }
 
 func (h *Http) ListenAndServe(log *zap.SugaredLogger) error {
 	r := chi.NewRouter()
 
 	key := ""            // Replace with your SESSION_SECRET or similar
+	key := h.SecretKey
 	maxAge := 86400 * 30 // 30 days
 
 	store := sessions.NewCookieStore([]byte(key))
