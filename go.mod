@@ -5,9 +5,12 @@ go 1.22.2
 require (
 	github.com/a-h/templ v0.2.680
 	github.com/go-chi/chi/v5 v5.0.12
+	github.com/google/uuid v1.4.0
+	github.com/gorilla/sessions v1.1.1
 	github.com/markbates/goth v1.79.0
 	github.com/spf13/cobra v1.8.0
 	github.com/spf13/viper v1.18.2
+	go.etcd.io/bbolt v1.3.10
 	go.uber.org/zap v1.27.0
 )
 
@@ -19,7 +22,6 @@ require (
 	github.com/gorilla/context v1.1.1 // indirect
 	github.com/gorilla/mux v1.6.2 // indirect
 	github.com/gorilla/securecookie v1.1.1 // indirect
-	github.com/gorilla/sessions v1.1.1 // indirect
 	github.com/hashicorp/hcl v1.0.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/magiconair/properties v1.8.7 // indirect

@@ -2,7 +2,7 @@ package transport
 
 import (
 	"context"
-	"fmt"
+	"git.lyonsoftworks.com/jlyon1/auth-proxy-gate/internal/readable"
 	"git.lyonsoftworks.com/jlyon1/auth-proxy-gate/internal/transport/ui"
 	"github.com/a-h/templ"
 	chi "github.com/go-chi/chi/v5"
@@ -14,6 +14,8 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+
+	bolt "go.etcd.io/bbolt"
 )
 
 type Http struct {
@@ -25,6 +27,8 @@ type Http struct {
 	RedirectURI  string `json:"RedirectURI"`
 	Proxy        string `json:"Proxy"`
 	SecretKey    string `json:"SecretKey"`
+
+	DB bolt.DB
 }
 
 func (h *Http) ListenAndServe(log *zap.SugaredLogger) error {
@@ -51,13 +55,18 @@ func (h *Http) ListenAndServe(log *zap.SugaredLogger) error {
 		ctx := context.Background()
 
 		email, err := gothic.GetFromSession("email", request)
+		if err != nil {
+			log.Error("error getting email from session", err)
+		}
 
 		components := []templ.Component{}
 
 		if email != "" {
+			log.Debug("user is authorized, proxying", zap.String("email", email))
 			request.Host = url.Host
 			p.ServeHTTP(writer, request)
 		} else if err != nil || email == "" {
+			log.Debug("user is not authorized, requesting login")
 			components = append(components, ui.LoginButton("", ""))
 		}
 
@@ -72,11 +81,20 @@ func (h *Http) ListenAndServe(log *zap.SugaredLogger) error {
 
 		user, err := gothic.CompleteUserAuth(writer, request)
 		if err != nil {
-			fmt.Fprintln(writer, err)
+			log.Error("error completing user auth", zap.Error(err))
+			writer.WriteHeader(500)
+			writer.Write([]byte("error completing user auth"))
 			return
 		}
 
-		gothic.StoreInSession("email", user.Email, request, writer)
+		token := readable.NewToken()
+
+		log.Debug("Generated internal token for user", token.String(), user.Email)
+
+		err = gothic.StoreInSession("internal_token", token.String(), request, writer)
+		if err != nil {
+			log.Error("error storing session field token", err)
+		}
 
 		http.Redirect(writer, request, "/", 302)
 
@@ -87,6 +105,24 @@ func (h *Http) ListenAndServe(log *zap.SugaredLogger) error {
 
 	r.Get("/auth", func(res http.ResponseWriter, req *http.Request) {
 		gothic.BeginAuthHandler(res, req)
+	})
+
+	r.Get("/auth/ident", func(res http.ResponseWriter, req *http.Request) {
+		// Here we will allow the application we are proxying for make requests back to this service to get information about the user.
+		//auth := req.Header.Get("Authorization")
+		//if auth == "" {
+		//	res.Write([]byte("unauthorized"))
+		//	res.WriteHeader(http.StatusUnauthorized)
+		//}
+
+		//ctx := context.Background()
+
+		val, err := gothic.GetFromSession("access_token", req)
+		if err != nil {
+			return
+		}
+
+		res.Write([]byte(val))
 	})
 
 	log.Infof("Listening on %s", h.ListenURL)
