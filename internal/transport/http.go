@@ -2,6 +2,7 @@ package transport
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"git.lyonsoftworks.com/jlyon1/auth-proxy-gate/internal/readable"
 	"git.lyonsoftworks.com/jlyon1/auth-proxy-gate/internal/transport/ui"
@@ -32,9 +33,20 @@ type Http struct {
 	DB bolt.DB // TODO: This struct needs a NewFunc
 }
 
+type UserData struct {
+	Email       string `json:"Email,omitempty"`
+	AccessToken string `json:"AccessToken,omitempty"`
+	UserID      string `json:"UserID"`
+}
+
+func internalError(w http.ResponseWriter, reason string) {
+	w.WriteHeader(http.StatusInternalServerError)
+	w.Write([]byte(reason))
+}
+
 func (h *Http) ListenAndServe(log *zap.SugaredLogger, ctx context.Context) error {
 	r := chi.NewRouter()
-	key := h.SecretKey
+	key := ""
 	maxAge := 86400 * 30 // 30 days
 
 	store := sessions.NewCookieStore([]byte(key))
@@ -55,18 +67,21 @@ func (h *Http) ListenAndServe(log *zap.SugaredLogger, ctx context.Context) error
 	r.HandleFunc("/*", func(writer http.ResponseWriter, request *http.Request) {
 		ctx := context.Background()
 
-		email, err := gothic.GetFromSession("email", request)
+		internalToken, err := gothic.GetFromSession("internal_token", request)
 		if err != nil {
-			log.Error("error getting email from session", err)
+			log.Error("error getting internal_token from session", err)
+			internalError(writer, "")
+			return
 		}
 
-		components := []templ.Component{}
+		var components []templ.Component
 
-		if email != "" {
-			log.Debug("user is authorized, proxying", zap.String("email", email))
+		if internalToken != "" {
+			log.Debug("user is authorized, proxying", zap.String("internal_token", internalToken))
 			request.Host = url.Host
+			request.Header.Add("X-Proxy-Authorization", internalToken)
 			p.ServeHTTP(writer, request)
-		} else if err != nil || email == "" {
+		} else if err != nil || internalToken == "" {
 			log.Debug("user is not authorized, requesting login")
 			components = append(components, ui.LoginButton("", ""))
 		}
@@ -88,13 +103,67 @@ func (h *Http) ListenAndServe(log *zap.SugaredLogger, ctx context.Context) error
 			return
 		}
 
-		token := readable.NewToken()
+		err = h.DB.Update(func(tx *bolt.Tx) error {
+			b, err := tx.CreateBucketIfNotExists([]byte("sessions"))
+			if err != nil {
+				return err
+			}
 
-		log.Debug("Generated internal token for user", token.String(), user.Email)
+			var tok readable.Token
 
-		err = gothic.StoreInSession("internal_token", token.String(), request, writer)
+			userIDKey := []byte(user.UserID)
+			tokenInDB := b.Get(userIDKey)
+
+			if tokenInDB == nil {
+				// Generate a new token and store it
+				token := readable.NewToken()
+
+				log.Debug("Generated internal token for user", token.String(), user.Email)
+
+				err := b.Put(userIDKey, []byte(token.String()))
+				if err != nil {
+					return err
+				}
+
+				tok = token
+			} else {
+				t, err := readable.NewTokenFromString(string(tokenInDB))
+				if err != nil {
+					return err
+				}
+
+				tok = *t
+			}
+
+			err = gothic.StoreInSession("internal_token", tok.String(), request, writer)
+			if err != nil {
+				log.Error("error storing session field token", err)
+			}
+
+			// At this point we should store the rest of the user data in bolt
+			userData := UserData{
+				Email:       user.Email,
+				AccessToken: user.AccessToken,
+				UserID:      user.UserID,
+			}
+
+			d, err := json.Marshal(userData)
+			if err != nil {
+				return err
+			}
+
+			err = b.Put([]byte(tok.String()), d)
+			if err != nil {
+				return err
+			}
+
+			return nil
+		})
+
 		if err != nil {
-			log.Error("error storing session field token", err)
+			log.Error("failed to retrieve value from db", err)
+			internalError(writer, "failed to retrieve value from db")
+			return
 		}
 
 		http.Redirect(writer, request, "/", 302)
@@ -109,21 +178,44 @@ func (h *Http) ListenAndServe(log *zap.SugaredLogger, ctx context.Context) error
 	})
 
 	r.Get("/auth/ident", func(res http.ResponseWriter, req *http.Request) {
-		// Here we will allow the application we are proxying for make requests back to this service to get information about the user.
-		//auth := req.Header.Get("Authorization")
-		//if auth == "" {
-		//	res.Write([]byte("unauthorized"))
-		//	res.WriteHeader(http.StatusUnauthorized)
-		//}
 
-		//ctx := context.Background()
+		var data UserData
 
-		val, err := gothic.GetFromSession("access_token", req)
+		uid := req.Header.Get("Authorization")
+
+		log.Info("got user id from request", uid)
+
+		_, err := readable.NewTokenFromString(uid)
 		if err != nil {
+			log.Error("token in bad format", err)
+			res.WriteHeader(http.StatusUnauthorized)
 			return
 		}
 
-		res.Write([]byte(val))
+		err = h.DB.View(func(tx *bolt.Tx) error {
+			b := tx.Bucket([]byte("sessions"))
+			if b == nil {
+				return errors.New("unexpected missing bucket")
+			}
+
+			rawData := b.Get([]byte(uid))
+
+			if rawData == nil {
+				return errors.New("unexpected empty user data")
+			}
+
+			return json.Unmarshal(rawData, &data)
+
+		})
+
+		if err != nil {
+			log.Error(err)
+			internalError(res, "failed to read user data")
+		}
+
+		d, _ := json.Marshal(data)
+
+		res.Write(d)
 	})
 
 	log.Infof("Listening on %s", h.ListenURL)

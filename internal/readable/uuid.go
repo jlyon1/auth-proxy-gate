@@ -17,12 +17,12 @@ type Token struct {
 }
 
 // NewToken generates a new readable token
-func NewToken() *Token {
+func NewToken() Token {
 	var tok Token
 
 	tok.uuid = uuid.New()
 
-	return &tok
+	return tok
 }
 
 func NewTokenFromString(token string) (*Token, error) {
@@ -41,7 +41,7 @@ func NewTokenFromString(token string) (*Token, error) {
 	return &tok, nil
 }
 
-func (t Token) String() string {
+func (t *Token) String() string {
 	return fmt.Sprintf("tok-%s", t.uuid.String())
 }
 
