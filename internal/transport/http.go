@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"git.lyonsoftworks.com/jlyon1/auth-proxy-gate/internal/readable"
 	"git.lyonsoftworks.com/jlyon1/auth-proxy-gate/internal/transport/ui"
 	"github.com/a-h/templ"
@@ -16,6 +17,8 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"sync"
+	"time"
 
 	bolt "go.etcd.io/bbolt"
 )
@@ -30,30 +33,47 @@ type Http struct {
 	Proxy        string `json:"Proxy"`
 	SecretKey    string `json:"SecretKey"`
 
-	DB bolt.DB // TODO: This struct needs a NewFunc
+	DB             bolt.DB // TODO: This struct needs a NewFunc
+	googleProvider *google.Provider
 }
 
-type UserData struct {
-	Email       string `json:"Email,omitempty"`
-	AccessToken string `json:"AccessToken,omitempty"`
-	UserID      string `json:"UserID"`
-}
+func (h *Http) ProactiveTokenRefresh(log *zap.SugaredLogger) error {
+	return h.DB.Update(func(tx *bolt.Tx) error {
+		b, err := tx.CreateBucketIfNotExists([]byte("tokens"))
+		if err != nil {
+			return err
+		}
 
-type InternalError struct {
-	Message string `json:"message"`
-}
+		return b.ForEach(func(k, v []byte) error {
+			var userData goth.User
 
-func (i InternalError) WriteTo(w http.ResponseWriter) {
-	data, _ := json.Marshal(i)
-	w.Header().Set("content-type", "application/json")
-	w.WriteHeader(http.StatusInternalServerError)
-	w.Write(data)
-}
+			err := json.Unmarshal(v, &userData)
+			if err != nil {
+				log.Error("error unmarshalling data for token ", string(k), string(v))
+				return nil
+			}
 
-func internalError(w http.ResponseWriter, reason string) {
-	InternalError{
-		reason,
-	}.WriteTo(w)
+			if !userData.ExpiresAt.After(time.Now().Add(15 * time.Minute)) {
+				log.Info("refreshing token for user ", string(k))
+
+				authToken, err := h.googleProvider.RefreshToken(userData.RefreshToken)
+				if err != nil {
+					return err
+				}
+
+				userData.AccessToken = authToken.AccessToken
+				userData.RefreshToken = authToken.RefreshToken
+				userData.ExpiresAt = authToken.Expiry
+
+				d, _ := json.Marshal(userData)
+
+				b.Put(k, d)
+
+				log.Info("refreshed user data for user ", string(k), " new expiry is ", userData.ExpiresAt)
+			}
+			return nil
+		})
+	})
 }
 
 func (h *Http) ListenAndServe(log *zap.SugaredLogger, ctx context.Context) error {
@@ -69,8 +89,11 @@ func (h *Http) ListenAndServe(log *zap.SugaredLogger, ctx context.Context) error
 
 	gothic.Store = store
 
+	h.googleProvider = google.New(h.ClientID, h.ClientSecret, fmt.Sprintf("%s/auth/callback?provider=google", h.RedirectURI), "email")
+
 	goth.UseProviders(
-		google.New(h.ClientID, h.ClientSecret, h.RedirectURI, "email"),
+		//TODO We should validate or document these
+		h.googleProvider,
 	)
 
 	url, _ := url.Parse(h.Proxy)
@@ -82,12 +105,12 @@ func (h *Http) ListenAndServe(log *zap.SugaredLogger, ctx context.Context) error
 		internalToken, err := gothic.GetFromSession("internal_token", request)
 		if err != nil {
 			log.Error("error getting internal_token from session", err)
-			internalError(writer, "")
+			writeInternalError(writer, "")
 			return
 		}
 
 		err = h.DB.View(func(tx *bolt.Tx) error {
-			b := tx.Bucket([]byte("sessions"))
+			b := tx.Bucket([]byte("tokens"))
 			if b == nil {
 				return errors.New("unexpected missing bucket")
 			}
@@ -106,6 +129,24 @@ func (h *Http) ListenAndServe(log *zap.SugaredLogger, ctx context.Context) error
 			log.Debug("user is authorized, proxying ", internalToken)
 			request.Host = url.Host
 			request.Header.Add("X-Proxy-Authorization", internalToken)
+
+			// If no proxy is set, dump the token
+			if h.Proxy == "" {
+				data := struct {
+					Token string `json:"Token"`
+					Ident string `json:"Ident"`
+				}{
+					Token: internalToken,
+					Ident: fmt.Sprintf("%s/auth/ident", h.RedirectURI),
+				}
+
+				writer.Header().Set("content-type", "application/json")
+				encodedData, _ := json.Marshal(data)
+
+				writer.Write(encodedData)
+				return
+			}
+
 			p.ServeHTTP(writer, request)
 		} else if err != nil || internalToken == "" {
 			log.Debug("user is not authorized, requesting login")
@@ -168,6 +209,11 @@ func (h *Http) ListenAndServe(log *zap.SugaredLogger, ctx context.Context) error
 
 			// At this point we should store the rest of the user data in bolt
 
+			b, err = tx.CreateBucketIfNotExists([]byte("tokens"))
+			if err != nil {
+				return err
+			}
+
 			d, err := json.Marshal(user)
 			if err != nil {
 				return err
@@ -183,7 +229,7 @@ func (h *Http) ListenAndServe(log *zap.SugaredLogger, ctx context.Context) error
 
 		if err != nil {
 			log.Error("failed to retrieve value from db", err)
-			internalError(writer, "failed to retrieve value from db")
+			writeInternalError(writer, "failed to retrieve value from db")
 			return
 		}
 
@@ -214,7 +260,7 @@ func (h *Http) ListenAndServe(log *zap.SugaredLogger, ctx context.Context) error
 		}
 
 		err = h.DB.View(func(tx *bolt.Tx) error {
-			b := tx.Bucket([]byte("sessions"))
+			b := tx.Bucket([]byte("tokens"))
 			if b == nil {
 				return errors.New("unexpected missing bucket")
 			}
@@ -231,7 +277,7 @@ func (h *Http) ListenAndServe(log *zap.SugaredLogger, ctx context.Context) error
 
 		if err != nil {
 			log.Error(err)
-			internalError(res, "failed to read user data")
+			writeInternalError(res, "failed to read user data")
 			return
 		}
 
@@ -249,10 +295,31 @@ func (h *Http) ListenAndServe(log *zap.SugaredLogger, ctx context.Context) error
 		Handler: r,
 	}
 
+	wg := sync.WaitGroup{}
+
+	wg.Add(1)
 	go func() {
 		<-ctx.Done()
 		if err := server.Close(); err != nil {
 			log.Fatalf("HTTP close error: %v", err)
+		}
+		wg.Done()
+	}()
+
+	wg.Add(1)
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				wg.Done()
+				return
+			case <-time.After(time.Minute):
+				log.Info("checking for any token refreshes")
+				err := h.ProactiveTokenRefresh(log)
+				if err != nil {
+					log.Warn("error refreshing tokens ", err)
+				}
+			}
 		}
 	}()
 
@@ -260,6 +327,8 @@ func (h *Http) ListenAndServe(log *zap.SugaredLogger, ctx context.Context) error
 		log.Fatalf("HTTP server error: %v", err)
 		return err
 	}
+
+	wg.Wait()
 
 	return nil
 }

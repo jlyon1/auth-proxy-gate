@@ -29,7 +29,7 @@ func NewTokenFromString(token string) (*Token, error) {
 	var tok Token
 
 	if token[0:4] != "tok-" {
-		return nil, errors.New("tokens must start with tok-")
+		return nil, errors.New("tokens must start with tok-, token is invalid")
 	} else {
 		uuid, err := uuid.Parse(token[4:])
 		if err != nil {

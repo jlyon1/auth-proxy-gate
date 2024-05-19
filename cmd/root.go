@@ -13,6 +13,7 @@ import (
 	"os/signal"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -41,7 +42,7 @@ var rootCmd = &cobra.Command{
 		logger, _ := zap.NewDevelopment()
 		log := logger.Sugar()
 
-		db, err := bolt.Open("./sessions.db", 0600, nil)
+		db, err := bolt.Open("./sessions.db", 0600, &bolt.Options{Timeout: 1 * time.Second})
 		if err != nil {
 			log.Error("error creating bolt db", err)
 		}
