@@ -165,67 +165,11 @@ func (h *Http) ListenAndServe(log *zap.SugaredLogger, ctx context.Context) error
 		user, err := gothic.CompleteUserAuth(writer, request)
 		if err != nil {
 			log.Error("error completing user auth", zap.Error(err))
-			writer.WriteHeader(500)
-			writer.Write([]byte("error completing user auth"))
+			writeInternalError(writer, "error completing user auth")
 			return
 		}
 
-		err = h.DB.Update(func(tx *bolt.Tx) error {
-			b, err := tx.CreateBucketIfNotExists([]byte("sessions"))
-			if err != nil {
-				return err
-			}
-
-			var tok readable.Token
-
-			userIDKey := []byte(user.UserID)
-			tokenInDB := b.Get(userIDKey)
-
-			if tokenInDB == nil {
-				// Generate a new token and store it
-				token := readable.NewToken()
-
-				log.Debug("Generated internal token for user", token.String(), user.Email)
-
-				err := b.Put(userIDKey, []byte(token.String()))
-				if err != nil {
-					return err
-				}
-
-				tok = token
-			} else {
-				t, err := readable.NewTokenFromString(string(tokenInDB))
-				if err != nil {
-					return err
-				}
-
-				tok = *t
-			}
-
-			err = gothic.StoreInSession("internal_token", tok.String(), request, writer)
-			if err != nil {
-				log.Error("error storing session field token", err)
-			}
-
-			// At this point we should store the rest of the user data in bolt
-
-			b, err = tx.CreateBucketIfNotExists([]byte("tokens"))
-			if err != nil {
-				return err
-			}
-
-			d, err := json.Marshal(user)
-			if err != nil {
-				return err
-			}
-
-			err = b.Put([]byte(tok.String()), d)
-			if err != nil {
-				return err
-			}
-
-			return nil
-		})
+		err = h.DB.Update(storeAuthDataInBoltFunc(writer, request, user, log))
 
 		if err != nil {
 			log.Error("failed to retrieve value from db", err)
@@ -259,21 +203,7 @@ func (h *Http) ListenAndServe(log *zap.SugaredLogger, ctx context.Context) error
 			return
 		}
 
-		err = h.DB.View(func(tx *bolt.Tx) error {
-			b := tx.Bucket([]byte("tokens"))
-			if b == nil {
-				return errors.New("unexpected missing bucket")
-			}
-
-			rawData := b.Get([]byte(uid))
-
-			if rawData == nil {
-				return errors.New("unexpected empty user data")
-			}
-
-			return json.Unmarshal(rawData, &data)
-
-		})
+		err = h.DB.View(getUserFromDbFunc(uid, data))
 
 		if err != nil {
 			log.Error(err)
@@ -331,4 +261,81 @@ func (h *Http) ListenAndServe(log *zap.SugaredLogger, ctx context.Context) error
 	wg.Wait()
 
 	return nil
+}
+
+func storeAuthDataInBoltFunc(writer http.ResponseWriter, request *http.Request, user goth.User, log *zap.SugaredLogger) func(tx *bolt.Tx) error {
+	return func(tx *bolt.Tx) error {
+		b, err := tx.CreateBucketIfNotExists([]byte("sessions"))
+		if err != nil {
+			return err
+		}
+
+		var tok readable.Token
+
+		userIDKey := []byte(user.UserID)
+		tokenInDB := b.Get(userIDKey)
+
+		if tokenInDB == nil {
+			// Generate a new token and store it
+			token := readable.NewToken()
+
+			log.Debug("Generated internal token for user", token.String(), user.Email)
+
+			err := b.Put(userIDKey, []byte(token.String()))
+			if err != nil {
+				return err
+			}
+
+			tok = token
+		} else {
+			t, err := readable.NewTokenFromString(string(tokenInDB))
+			if err != nil {
+				return err
+			}
+
+			tok = *t
+		}
+
+		err = gothic.StoreInSession("internal_token", tok.String(), request, writer)
+		if err != nil {
+			log.Error("error storing session field token", err)
+		}
+
+		// At this point we should store the rest of the user data in bolt
+
+		b, err = tx.CreateBucketIfNotExists([]byte("tokens"))
+		if err != nil {
+			return err
+		}
+
+		d, err := json.Marshal(user)
+		if err != nil {
+			return err
+		}
+
+		err = b.Put([]byte(tok.String()), d)
+		if err != nil {
+			return err
+		}
+
+		return nil
+	}
+}
+
+func getUserFromDbFunc(uid string, data goth.User) func(tx *bolt.Tx) error {
+	return func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("tokens"))
+		if b == nil {
+			return errors.New("unexpected missing bucket")
+		}
+
+		rawData := b.Get([]byte(uid))
+
+		if rawData == nil {
+			return errors.New("unexpected empty user data")
+		}
+
+		return json.Unmarshal(rawData, &data)
+
+	}
 }
