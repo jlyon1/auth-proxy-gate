@@ -39,9 +39,21 @@ type UserData struct {
 	UserID      string `json:"UserID"`
 }
 
-func internalError(w http.ResponseWriter, reason string) {
+type InternalError struct {
+	Message string `json:"message"`
+}
+
+func (i InternalError) WriteTo(w http.ResponseWriter) {
+	data, _ := json.Marshal(i)
+	w.Header().Set("content-type", "application/json")
 	w.WriteHeader(http.StatusInternalServerError)
-	w.Write([]byte(reason))
+	w.Write(data)
+}
+
+func internalError(w http.ResponseWriter, reason string) {
+	InternalError{
+		reason,
+	}.WriteTo(w)
 }
 
 func (h *Http) ListenAndServe(log *zap.SugaredLogger, ctx context.Context) error {
@@ -74,10 +86,24 @@ func (h *Http) ListenAndServe(log *zap.SugaredLogger, ctx context.Context) error
 			return
 		}
 
+		err = h.DB.View(func(tx *bolt.Tx) error {
+			b := tx.Bucket([]byte("sessions"))
+			if b == nil {
+				return errors.New("unexpected missing bucket")
+			}
+
+			rawData := b.Get([]byte(internalToken))
+			if rawData == nil {
+				return errors.New("no session for user")
+			}
+
+			return nil
+		})
+
 		var components []templ.Component
 
-		if internalToken != "" {
-			log.Debug("user is authorized, proxying", zap.String("internal_token", internalToken))
+		if internalToken != "" && err == nil {
+			log.Debug("user is authorized, proxying ", internalToken)
 			request.Host = url.Host
 			request.Header.Add("X-Proxy-Authorization", internalToken)
 			p.ServeHTTP(writer, request)
@@ -141,13 +167,8 @@ func (h *Http) ListenAndServe(log *zap.SugaredLogger, ctx context.Context) error
 			}
 
 			// At this point we should store the rest of the user data in bolt
-			userData := UserData{
-				Email:       user.Email,
-				AccessToken: user.AccessToken,
-				UserID:      user.UserID,
-			}
 
-			d, err := json.Marshal(userData)
+			d, err := json.Marshal(user)
 			if err != nil {
 				return err
 			}
@@ -179,15 +200,15 @@ func (h *Http) ListenAndServe(log *zap.SugaredLogger, ctx context.Context) error
 
 	r.Get("/auth/ident", func(res http.ResponseWriter, req *http.Request) {
 
-		var data UserData
+		var data goth.User
 
 		uid := req.Header.Get("Authorization")
 
-		log.Info("got user id from request", uid)
+		log.Info("got user id from request ", uid)
 
 		_, err := readable.NewTokenFromString(uid)
 		if err != nil {
-			log.Error("token in bad format", err)
+			log.Error("token in bad format ", err)
 			res.WriteHeader(http.StatusUnauthorized)
 			return
 		}
@@ -211,9 +232,12 @@ func (h *Http) ListenAndServe(log *zap.SugaredLogger, ctx context.Context) error
 		if err != nil {
 			log.Error(err)
 			internalError(res, "failed to read user data")
+			return
 		}
 
 		d, _ := json.Marshal(data)
+
+		res.Header().Set("content-type", "application/json")
 
 		res.Write(d)
 	})
