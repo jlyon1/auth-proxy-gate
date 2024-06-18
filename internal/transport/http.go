@@ -27,11 +27,12 @@ type Http struct {
 	ListenURL string `json:"ListenURL,omitempty"`
 	Secure    bool   `json:"Secure"`
 
-	ClientID     string `json:"ClientID"`
-	ClientSecret string `json:"ClientSecret"`
-	RedirectURI  string `json:"RedirectURI"`
-	Proxy        string `json:"Proxy"`
-	SecretKey    string `json:"SecretKey"`
+	ClientID     string   `json:"ClientID"`
+	ClientSecret string   `json:"ClientSecret"`
+	RedirectURI  string   `json:"RedirectURI"`
+	Proxy        string   `json:"Proxy"`
+	SecretKey    string   `json:"SecretKey"`
+	AllowList    []string `json:"AllowList"`
 
 	DB             bolt.DB // TODO: This struct needs a NewFunc
 	googleProvider *google.Provider
@@ -103,11 +104,6 @@ func (h *Http) ListenAndServe(log *zap.SugaredLogger, ctx context.Context) error
 		ctx := context.Background()
 
 		internalToken, err := gothic.GetFromSession("internal_token", request)
-		if err != nil {
-			log.Error("error getting internal_token from session", err)
-			writeInternalError(writer, "")
-			return
-		}
 
 		err = h.DB.View(func(tx *bolt.Tx) error {
 			b := tx.Bucket([]byte("tokens"))
@@ -125,7 +121,7 @@ func (h *Http) ListenAndServe(log *zap.SugaredLogger, ctx context.Context) error
 
 		var components []templ.Component
 
-		if internalToken != "" && err == nil {
+		if internalToken != "" || err == nil {
 			log.Debug("user is authorized, proxying ", internalToken)
 			request.Host = url.Host
 			request.Header.Add("X-Proxy-Authorization", internalToken)
@@ -166,6 +162,25 @@ func (h *Http) ListenAndServe(log *zap.SugaredLogger, ctx context.Context) error
 		if err != nil {
 			log.Error("error completing user auth", zap.Error(err))
 			writeInternalError(writer, "error completing user auth")
+			return
+		}
+
+		found := false
+		for _, entry := range h.AllowList {
+			if entry == user.Email {
+				found = true
+				break
+			}
+		}
+
+		if len(h.AllowList) == 0 {
+			found = true
+		}
+
+		if !found {
+			log.Infof("found not allowed user %s", user.Email)
+			writer.WriteHeader(401)
+			writer.Write([]byte("unauthorized"))
 			return
 		}
 

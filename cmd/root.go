@@ -11,6 +11,7 @@ import (
 	"go.uber.org/zap"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -36,11 +37,18 @@ var rootCmd = &cobra.Command{
 		redirect := viper.GetString("redirect")
 		clientID := viper.GetString("clientid")
 		secretKey := viper.GetString("secretKey")
+		allowList := viper.GetString("allowList")
+
+		list := strings.Split(allowList, ",")
 
 		proxy := viper.GetString("proxy")
 
 		logger, _ := zap.NewDevelopment()
 		log := logger.Sugar()
+
+		if len(list) == 0 {
+			log.Warn("list is empty, all users allowed")
+		}
 
 		db, err := bolt.Open("./sessions.db", 0600, &bolt.Options{Timeout: 1 * time.Second})
 		if err != nil {
@@ -60,6 +68,7 @@ var rootCmd = &cobra.Command{
 			ClientID:     clientID,
 			Proxy:        proxy,
 			SecretKey:    secretKey,
+			AllowList:    list,
 
 			DB: *db,
 		}
@@ -133,4 +142,7 @@ func init() {
 
 	rootCmd.Flags().String("secretKey", "", "Secret Key")
 	viper.BindPFlag("secretKey", rootCmd.Flags().Lookup("secretKey"))
+
+	rootCmd.Flags().String("allowList", "", "Allow List")
+	viper.BindPFlag("allowList", rootCmd.Flags().Lookup("allowList"))
 }
