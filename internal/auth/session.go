@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"git.lyonsoftworks.com/jlyon1/auth-proxy-gate/internal/readable"
 	"git.lyonsoftworks.com/jlyon1/auth-proxy-gate/internal/users"
 	"github.com/markbates/goth/gothic"
@@ -24,6 +25,23 @@ func init() {
 
 type Authenticator struct {
 	DB *sql.DB
+}
+
+type AuthenticatorConfig struct {
+	MaxAge             int    `json:"MaxAge,omitempty"`
+	HttpOnly           bool   `json:"HttpOnly,omitempty"`
+	Secure             bool   `json:"Secure,omitempty"`
+	DBConnectionString string `json:"DBConnectionString,omitempty"`
+	ProviderConfigs    []struct {
+		ProviderName string `json:"ProviderName,omitempty"`
+		ClientID     string `json:"ClientID,omitempty"`
+		ClientSecret string `json:"ClientSecret,omitempty"`
+		RedirectUri  string `json:"RedirectUri,omitempty"`
+	} `json:"ProviderConfigs,omitempty"`
+}
+
+func NewAuthenticator(config AuthenticatorConfig) (*Authenticator, error) {
+	return nil, nil
 }
 
 func (a *Authenticator) GetUserFromSession(request *http.Request) (*users.User, error) {
@@ -117,4 +135,45 @@ func (a *Authenticator) LinkProviderToAccount(ctx context.Context, accountID str
 	tx.Commit()
 
 	return nil
+}
+
+func AuthenticateAndGetAuthorizedUserData(request *http.Request, writer http.ResponseWriter, filters []Filter) (*AuthorizedProviderUserData, error) {
+	provider := request.URL.Query().Get("provider")
+
+	var user AuthorizedProviderUserData
+
+	if provider == "" {
+		return nil, errors.New("provider must not be empty")
+	}
+
+	switch provider {
+	case ProviderGoogle:
+		gothUser, err := gothic.CompleteUserAuth(writer, request)
+		if err != nil {
+			return nil, err
+		}
+
+		user.UserID = gothUser.UserID
+		user.Email = gothUser.Email
+		user.Name = gothUser.Name
+	case ProviderUnsafe:
+		username := request.URL.Query().Get("username")
+		if username == "" {
+			writer.Write([]byte("unauthorized"))
+		}
+
+		user.Email = fmt.Sprintf("%s@example.com", username)
+		user.UserID = username
+		user.Name = username
+	}
+
+	user.Provider = provider
+
+	for _, filter := range filters {
+		if !filter.Validate(user) {
+			return nil, fmt.Errorf("user %s failed filter %s", user.UserID, filter.Name())
+		}
+	}
+
+	return &user, nil
 }

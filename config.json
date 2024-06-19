@@ -1,0 +1,22 @@
+{
+  "AuthenticatorConfig": {
+    "MaxAge": 3600,
+    "HttpOnly": true,
+    "Secure": true,
+    "DBConnectionString": "./accounts.db",
+    "ProviderConfigs": [
+      {
+        "ProviderName": "google",
+        "ClientID": "google-client-id",
+        "ClientSecret": "google-client-secret",
+        "RedirectUri": "https://yourapp.com/auth/callback/google"
+      },
+      {
+        "ProviderName": "facebook",
+        "ClientID": "facebook-client-id",
+        "ClientSecret": "facebook-client-secret",
+        "RedirectUri": "https://yourapp.com/auth/callback/facebook"
+      }
+    ]
+  }
+}

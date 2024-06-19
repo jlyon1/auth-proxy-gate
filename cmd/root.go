@@ -21,6 +21,10 @@ import (
 	"github.com/spf13/viper"
 )
 
+type AppConfig struct {
+	AuthenticatorConfig auth.AuthenticatorConfig `json:"AuthenticatorConfig"`
+}
+
 // rootCmd represents the base command when called without any subcommands
 var rootCmd = &cobra.Command{
 	Use:   "auth-proxy-gate",
@@ -29,6 +33,19 @@ var rootCmd = &cobra.Command{
 	// Uncomment the following line if your bare application
 	// has an action associated with it:
 	Run: func(cmd *cobra.Command, args []string) {
+		var cfg AppConfig
+
+		err := viper.ReadInConfig()
+		if err != nil {
+			panic("config not found") //TODO fix error handling here
+		}
+
+		err = viper.Unmarshal(&cfg)
+		if err != nil {
+			panic(err)
+		}
+
+		fmt.Println(cfg)
 
 		host := viper.GetString("host")
 		port := viper.GetInt32("port")
@@ -150,4 +167,7 @@ func init() {
 
 	rootCmd.Flags().String("allowList", "", "Allow List")
 	viper.BindPFlag("allowList", rootCmd.Flags().Lookup("allowList"))
+
+	viper.AddConfigPath(".")
+	viper.SetConfigFile("config.json")
 }

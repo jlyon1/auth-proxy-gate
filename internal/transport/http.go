@@ -40,42 +40,7 @@ type Http struct {
 }
 
 func (h *Http) ProactiveTokenRefresh(log *zap.SugaredLogger) error {
-	//return h.DB.Update(func(tx *bolt.Tx) error {
-	//	b, err := tx.CreateBucketIfNotExists([]byte("tokens"))
-	//	if err != nil {
-	//		return err
-	//	}
-	//
-	//	return b.ForEach(func(k, v []byte) error {
-	//		var userData goth.User
-	//
-	//		err := json.Unmarshal(v, &userData)
-	//		if err != nil {
-	//			log.Error("error unmarshalling data for token ", string(k), string(v))
-	//			return nil
-	//		}
-	//
-	//		if !userData.ExpiresAt.After(time.Now().Add(15 * time.Minute)) {
-	//			log.Info("refreshing token for user ", string(k))
-	//
-	//			authToken, err := h.googleProvider.RefreshToken(userData.RefreshToken)
-	//			if err != nil {
-	//				return err
-	//			}
-	//
-	//			userData.AccessToken = authToken.AccessToken
-	//			userData.RefreshToken = authToken.RefreshToken
-	//			userData.ExpiresAt = authToken.Expiry
-	//
-	//			d, _ := json.Marshal(userData)
-	//
-	//			b.Put(k, d)
-	//
-	//			log.Info("refreshed user data for user ", string(k), " new expiry is ", userData.ExpiresAt)
-	//		}
-	//		return nil
-	//	})
-	//})
+
 	return nil
 }
 
