@@ -5,7 +5,6 @@ package cmd
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"git.lyonsoftworks.com/jlyon1/auth-proxy-gate/internal/auth"
 	"git.lyonsoftworks.com/jlyon1/auth-proxy-gate/internal/transport"
@@ -21,11 +20,11 @@ import (
 )
 
 type AppConfig struct {
-	Host                string                   `json:"Host,omitempty"`
-	Port                int32                    `json:"Port,omitempty"`
-	AllowList           []string                 `json:"AllowList,omitempty"`
-	ProxyUrl            string                   `json:"ProxyUrl,omitempty"`
-	AuthenticatorConfig auth.AuthenticatorConfig `json:"AuthenticatorConfig"`
+	Host                     string                        `json:"Host,omitempty"`
+	Port                     int32                         `json:"Port,omitempty"`
+	AllowList                []string                      `json:"AllowList,omitempty"`
+	ProxyUrl                 string                        `json:"ProxyUrl,omitempty"`
+	UserSessionManagerConfig auth.UserSessionManagerConfig `json:"UserSessionManagerConfig"`
 }
 
 // rootCmd represents the base command when called without any subcommands
@@ -48,23 +47,14 @@ var rootCmd = &cobra.Command{
 			panic(err)
 		}
 
-		fmt.Println(cfg)
-
 		logger, _ := zap.NewDevelopment()
 		log := logger.Sugar()
-
-		db, err := sql.Open("sqlite3", "./accounts.db")
-		if err != nil {
-			panic(err)
-		}
-
-		defer db.Close()
 
 		defer func() {
 			log.Info("Graceful shutdown complete")
 		}()
 
-		authenticator, err := auth.NewAuthenticator(cfg.AuthenticatorConfig)
+		authenticator, err := auth.NewAuthenticator(cfg.UserSessionManagerConfig)
 
 		if err != nil {
 			panic(err)
@@ -74,15 +64,14 @@ var rootCmd = &cobra.Command{
 
 		api := transport.Http{
 			ListenURL:     fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
-			RedirectURI:   cfg.AuthenticatorConfig.ProviderConfigs[0].RedirectUri,
-			ClientSecret:  cfg.AuthenticatorConfig.ProviderConfigs[0].ClientSecret,
-			ClientID:      cfg.AuthenticatorConfig.ProviderConfigs[0].ClientID,
+			RedirectURI:   cfg.UserSessionManagerConfig.ProviderConfigs[0].RedirectUri,
+			ClientSecret:  cfg.UserSessionManagerConfig.ProviderConfigs[0].ClientSecret,
+			ClientID:      cfg.UserSessionManagerConfig.ProviderConfigs[0].ClientID,
 			Proxy:         cfg.ProxyUrl,
 			AllowList:     cfg.AllowList,
 			Authenticator: authenticator,
-
-			DB: db,
 		}
+
 		wg := sync.WaitGroup{}
 
 		ctx, cancel := context.WithCancel(context.Background())

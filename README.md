@@ -6,6 +6,7 @@ Upcoming Feature list:
 - [x] Allow-List
 - [x] Config File
 - [x] Link Accounts
+- [ ] Last Login Time
 - [ ] Admin Accounts
 - [ ] Token Validation (For downstream services)
 - [ ] Structured Logging
@@ -14,3 +15,4 @@ Upcoming Feature list:
 - [ ] Login With Twitch
 - [ ] Login With GitHub
 - [ ] User Analytics
+- [ ] GDPR Compliance

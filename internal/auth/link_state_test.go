@@ -1,6 +1,8 @@
 package auth
 
-import "testing"
+import (
+	"testing"
+)
 
 func TestLinkState_EncodeAndDecode(t *testing.T) {
 	l := LinkState{
@@ -13,9 +15,7 @@ func TestLinkState_EncodeAndDecode(t *testing.T) {
 		t.Error("Failed to encode linkstate unexpectedly")
 	}
 
-	s2 := LinkState{}
-
-	err = s2.Decode(val)
+	s2, err := DecodeLinkStateFromStateVar(val)
 	if err != nil {
 		t.Error("Failed to decode")
 	}

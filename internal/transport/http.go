@@ -2,7 +2,6 @@ package transport
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -28,7 +27,6 @@ type Http struct {
 	Proxy        string   `json:"Proxy"`
 	AllowList    []string `json:"AllowList"`
 
-	DB            *sql.DB // TODO: This struct needs a NewFunc
 	Authenticator *auth.UserSessionManager
 }
 
@@ -53,7 +51,6 @@ func (h *Http) ListenAndServe(log *zap.SugaredLogger, ctx context.Context) error
 			log.Debugf("user is not authorized, requesting login %s %s", err)
 			components = append(components, ui.LoginButton("", ""))
 			_ = ui.Page("Login", components).Render(ctx, writer)
-
 			return
 		}
 
@@ -109,8 +106,11 @@ func (h *Http) ListenAndServe(log *zap.SugaredLogger, ctx context.Context) error
 
 		state := request.URL.Query().Get("state")
 
-		ls := auth.LinkState{}
-		err = ls.Decode(state)
+		ls, err := auth.DecodeLinkStateFromStateVar(state)
+
+		if ls == nil {
+			ls = &auth.LinkState{}
+		}
 
 		if err != nil {
 			log.Info("no link state on request", err)

@@ -1,12 +1,8 @@
 package auth
 
 import (
-	"bytes"
 	"context"
-	"crypto/rand"
 	"database/sql"
-	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"git.lyonsoftworks.com/jlyon1/auth-proxy-gate/internal/readable"
@@ -16,9 +12,7 @@ import (
 	"github.com/markbates/goth/gothic"
 	"github.com/markbates/goth/providers/google"
 	"go.uber.org/zap"
-	"io"
 	"net/http"
-	"strings"
 )
 
 const (
@@ -40,7 +34,7 @@ func (a *UserSessionManager) Shutdown() {
 	a.DB.Close()
 }
 
-type AuthenticatorConfig struct {
+type UserSessionManagerConfig struct {
 	MaxAge             int    `json:"MaxAge,omitempty"`
 	HttpOnly           bool   `json:"HttpOnly,omitempty"`
 	Secure             bool   `json:"Secure,omitempty"`
@@ -55,7 +49,7 @@ type AuthenticatorConfig struct {
 	} `json:"ProviderConfigs,omitempty"`
 }
 
-func NewAuthenticator(config AuthenticatorConfig) (*UserSessionManager, error) {
+func NewAuthenticator(config UserSessionManagerConfig) (*UserSessionManager, error) {
 	store := sessions.NewCookieStore([]byte(config.SecretKey))
 	store.MaxAge(config.MaxAge)
 	store.Options.Path = "/"
@@ -183,38 +177,6 @@ func (a *UserSessionManager) CreateNewOrGetExistingAccountAccountWithProviderDat
 	}
 
 	return &userInfo, nil
-}
-
-type LinkState struct {
-	Link      bool   `json:"Link,omitempty"`
-	AccountId string `json:"AccountId"`
-	Rand      []byte `json:"Rand,omitempty"`
-}
-
-func (l *LinkState) randomize() {
-	nonceBytes := make([]byte, 50)
-	_, err := io.ReadFull(rand.Reader, nonceBytes)
-	if err != nil {
-		panic("gothic: source of randomness unavailable: " + err.Error())
-	}
-	l.Rand = nonceBytes
-}
-
-func (l *LinkState) Encode() (string, error) {
-	l.randomize()
-
-	var buf bytes.Buffer
-	encoder := base64.NewEncoder(base64.StdEncoding, &buf)
-	err := json.NewEncoder(encoder).Encode(l)
-	if err != nil {
-		return "", err
-	}
-
-	return buf.String(), nil
-}
-
-func (l *LinkState) Decode(source string) error {
-	return json.NewDecoder(base64.NewDecoder(base64.StdEncoding, strings.NewReader(source))).Decode(l)
 }
 
 func (a *UserSessionManager) BeginAuthFlow(request *http.Request, writer http.ResponseWriter) {

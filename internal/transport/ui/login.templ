@@ -7,6 +7,8 @@ templ Page(title string, content []templ.Component){
         <meta charset="UTF-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1.0" />
         <script src="https://cdn.tailwindcss.com"></script>
+        <script src="https://unpkg.com/htmx.org@2.0.0"></script>
+
     </head>
     <body>
         <script src="https://accounts.google.com/gsi/client" async></script>
@@ -75,6 +77,10 @@ templ LoginButton(clientID string, uri string){
 
   </div>
 </div>
+
+}
+
+templ UserList() {
 
 }
 
