@@ -11,10 +11,8 @@ import (
 	"git.lyonsoftworks.com/jlyon1/auth-proxy-gate/internal/transport/ui"
 	"github.com/a-h/templ"
 	chi "github.com/go-chi/chi/v5"
-	"github.com/gorilla/sessions"
 	"github.com/markbates/goth"
 	"github.com/markbates/goth/gothic"
-	"github.com/markbates/goth/providers/google"
 	"go.uber.org/zap"
 	"net/http"
 	"net/http/httputil"
@@ -25,18 +23,15 @@ import (
 
 type Http struct {
 	ListenURL string `json:"ListenURL,omitempty"`
-	Secure    bool   `json:"Secure"`
 
 	ClientID     string   `json:"ClientID"`
 	ClientSecret string   `json:"ClientSecret"`
 	RedirectURI  string   `json:"RedirectURI"`
 	Proxy        string   `json:"Proxy"`
-	SecretKey    string   `json:"SecretKey"`
 	AllowList    []string `json:"AllowList"`
 
-	DB             *sql.DB // TODO: This struct needs a NewFunc
-	Authenticator  *auth.Authenticator
-	googleProvider *google.Provider
+	DB            *sql.DB // TODO: This struct needs a NewFunc
+	Authenticator *auth.Authenticator
 }
 
 func (h *Http) ProactiveTokenRefresh(log *zap.SugaredLogger) error {
@@ -46,23 +41,6 @@ func (h *Http) ProactiveTokenRefresh(log *zap.SugaredLogger) error {
 
 func (h *Http) ListenAndServe(log *zap.SugaredLogger, ctx context.Context) error {
 	r := chi.NewRouter()
-	key := ""
-	maxAge := 86400 * 30 // 30 days
-
-	store := sessions.NewCookieStore([]byte(key))
-	store.MaxAge(maxAge)
-	store.Options.Path = "/"
-	store.Options.HttpOnly = true // HttpOnly should always be enabled
-	store.Options.Secure = h.Secure
-
-	gothic.Store = store
-
-	h.googleProvider = google.New(h.ClientID, h.ClientSecret, fmt.Sprintf("%s/auth/callback?provider=google", h.RedirectURI), "email")
-
-	goth.UseProviders(
-		//TODO We should validate or document these
-		h.googleProvider,
-	)
 
 	url, _ := url.Parse(h.Proxy)
 	p := httputil.NewSingleHostReverseProxy(url)

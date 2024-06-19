@@ -13,7 +13,6 @@ import (
 	"go.uber.org/zap"
 	"os"
 	"os/signal"
-	"strings"
 	"sync"
 	"syscall"
 
@@ -22,6 +21,10 @@ import (
 )
 
 type AppConfig struct {
+	Host                string                   `json:"Host,omitempty"`
+	Port                int32                    `json:"Port,omitempty"`
+	AllowList           []string                 `json:"AllowList,omitempty"`
+	ProxyUrl            string                   `json:"ProxyUrl,omitempty"`
 	AuthenticatorConfig auth.AuthenticatorConfig `json:"AuthenticatorConfig"`
 }
 
@@ -47,26 +50,8 @@ var rootCmd = &cobra.Command{
 
 		fmt.Println(cfg)
 
-		host := viper.GetString("host")
-		port := viper.GetInt32("port")
-		secure := viper.GetBool("secure")
-
-		secret := viper.GetString("secret")
-		redirect := viper.GetString("redirect")
-		clientID := viper.GetString("clientid")
-		secretKey := viper.GetString("secretKey")
-		allowList := viper.GetString("allowList")
-
-		list := strings.Split(allowList, ",")
-
-		proxy := viper.GetString("proxy")
-
 		logger, _ := zap.NewDevelopment()
 		log := logger.Sugar()
-
-		if len(list) == 0 {
-			log.Warn("list is empty, all users allowed")
-		}
 
 		db, err := sql.Open("sqlite3", "./accounts.db")
 		if err != nil {
@@ -79,18 +64,22 @@ var rootCmd = &cobra.Command{
 			log.Info("Graceful shutdown complete")
 		}()
 
+		authenticator, err := auth.NewAuthenticator(cfg.AuthenticatorConfig)
+
+		if err != nil {
+			panic(err)
+		}
+
+		defer authenticator.Shutdown()
+
 		api := transport.Http{
-			ListenURL:    fmt.Sprintf("%s:%d", host, port),
-			Secure:       secure,
-			RedirectURI:  redirect,
-			ClientSecret: secret,
-			ClientID:     clientID,
-			Proxy:        proxy,
-			SecretKey:    secretKey,
-			AllowList:    list,
-			Authenticator: &auth.Authenticator{
-				DB: db,
-			},
+			ListenURL:     fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
+			RedirectURI:   cfg.AuthenticatorConfig.ProviderConfigs[0].RedirectUri,
+			ClientSecret:  cfg.AuthenticatorConfig.ProviderConfigs[0].ClientSecret,
+			ClientID:      cfg.AuthenticatorConfig.ProviderConfigs[0].ClientID,
+			Proxy:         cfg.ProxyUrl,
+			AllowList:     cfg.AllowList,
+			Authenticator: authenticator,
 
 			DB: db,
 		}
@@ -142,19 +131,19 @@ func init() {
 	// Cobra also supports local flags, which will only run
 	// when this action is called directly.
 	rootCmd.Flags().String("host", "0.0.0.0", "Host to listen on")
-	viper.BindPFlag("host", rootCmd.Flags().Lookup("host"))
+	viper.BindPFlag("Host", rootCmd.Flags().Lookup("host"))
 
 	rootCmd.Flags().Int32("port", 8081, "port to listen on")
-	viper.BindPFlag("port", rootCmd.Flags().Lookup("port"))
+	viper.BindPFlag("Port", rootCmd.Flags().Lookup("port"))
 
 	rootCmd.Flags().Bool("secure", false, "secure")
-	viper.BindPFlag("secure", rootCmd.Flags().Lookup("secure"))
+	viper.BindPFlag("Secure", rootCmd.Flags().Lookup("secure"))
 
 	rootCmd.Flags().String("secret", "", "Client Secret")
 	viper.BindPFlag("secret", rootCmd.Flags().Lookup("secret"))
 
-	rootCmd.Flags().String("redirect", "", "Redirect")
-	viper.BindPFlag("redirect", rootCmd.Flags().Lookup("redirect"))
+	rootCmd.Flags().String("Redirect", "", "Redirect")
+	viper.BindPFlag("Redirect", rootCmd.Flags().Lookup("redirect"))
 
 	rootCmd.Flags().String("clientid", "", "Client ID")
 	viper.BindPFlag("clientid", rootCmd.Flags().Lookup("clientid"))

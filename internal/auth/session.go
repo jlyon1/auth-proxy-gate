@@ -7,7 +7,10 @@ import (
 	"fmt"
 	"git.lyonsoftworks.com/jlyon1/auth-proxy-gate/internal/readable"
 	"git.lyonsoftworks.com/jlyon1/auth-proxy-gate/internal/users"
+	"github.com/gorilla/sessions"
+	"github.com/markbates/goth"
 	"github.com/markbates/goth/gothic"
+	"github.com/markbates/goth/providers/google"
 	"go.uber.org/zap"
 	"net/http"
 )
@@ -27,21 +30,58 @@ type Authenticator struct {
 	DB *sql.DB
 }
 
+func (a *Authenticator) Shutdown() {
+	a.DB.Close()
+}
+
 type AuthenticatorConfig struct {
 	MaxAge             int    `json:"MaxAge,omitempty"`
 	HttpOnly           bool   `json:"HttpOnly,omitempty"`
 	Secure             bool   `json:"Secure,omitempty"`
+	SecretKey          string `json:"SecretKey"`
 	DBConnectionString string `json:"DBConnectionString,omitempty"`
 	ProviderConfigs    []struct {
 		ProviderName string `json:"ProviderName,omitempty"`
 		ClientID     string `json:"ClientID,omitempty"`
 		ClientSecret string `json:"ClientSecret,omitempty"`
 		RedirectUri  string `json:"RedirectUri,omitempty"`
+		Scopes       string `json:"Scopes"`
 	} `json:"ProviderConfigs,omitempty"`
 }
 
 func NewAuthenticator(config AuthenticatorConfig) (*Authenticator, error) {
-	return nil, nil
+	store := sessions.NewCookieStore([]byte(config.SecretKey))
+	store.MaxAge(config.MaxAge)
+	store.Options.Path = "/"
+	store.Options.HttpOnly = true // HttpOnly should always be enabled
+	store.Options.Secure = config.Secure
+
+	gothic.Store = store
+
+	db, err := sql.Open("sqlite3", "./accounts.db")
+	if err != nil {
+		panic(err)
+	}
+
+	var a Authenticator
+
+	var providers []goth.Provider
+
+	for _, provider := range config.ProviderConfigs {
+		switch provider.ProviderName {
+		case ProviderGoogle:
+			prov := google.New(provider.ClientID, provider.ClientSecret, fmt.Sprintf("%s/auth/callback?provider=google", provider.RedirectUri), provider.Scopes)
+			providers = append(providers, prov)
+		default:
+			return nil, fmt.Errorf("unknown provider %s, known providers are google, unsafe", provider.ProviderName)
+		}
+	}
+
+	goth.UseProviders(providers...)
+
+	a.DB = db
+
+	return &a, nil
 }
 
 func (a *Authenticator) GetUserFromSession(request *http.Request) (*users.User, error) {
