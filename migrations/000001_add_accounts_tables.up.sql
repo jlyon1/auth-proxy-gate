@@ -19,5 +19,6 @@ CREATE TABLE accounts_providers
     account_id          string,
     provider_account_id string,
     FOREIGN KEY (provider_id) REFERENCES providers(id),
-    FOREIGN KEY (account_id) REFERENCES accounts(id)
+    FOREIGN KEY (account_id) REFERENCES accounts(id),
+    PRIMARY KEY (provider_id, account_id, provider_account_id)
 );

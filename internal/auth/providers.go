@@ -8,29 +8,30 @@ import (
 )
 
 const (
-	PROVIDER_GOOGLE = "google"
-	PROVIDER_UNSAFE = "unsafe"
+	ProviderGoogle = "google"
+	ProviderUnsafe = "unsafe"
 )
 
-// AuthorizedUserData represents authorized user data from a provider
-type AuthorizedUserData struct {
+// AuthorizedProviderUserData represents authorized user data from a provider
+// it can be used to create an account or link to an existing one
+type AuthorizedProviderUserData struct {
 	Provider string
 	Email    string
 	UserID   string
 	Name     string
 }
 
-func AuthenticateAndGetAuthorizedUserData(request *http.Request, writer http.ResponseWriter, filters []Filter) (*AuthorizedUserData, error) {
+func AuthenticateAndGetAuthorizedUserData(request *http.Request, writer http.ResponseWriter, filters []Filter) (*AuthorizedProviderUserData, error) {
 	provider := request.URL.Query().Get("provider")
 
-	var user AuthorizedUserData
+	var user AuthorizedProviderUserData
 
 	if provider == "" {
 		return nil, errors.New("provider must not be empty")
 	}
 
 	switch provider {
-	case PROVIDER_GOOGLE:
+	case ProviderGoogle:
 		gothUser, err := gothic.CompleteUserAuth(writer, request)
 		if err != nil {
 			return nil, err
@@ -39,7 +40,7 @@ func AuthenticateAndGetAuthorizedUserData(request *http.Request, writer http.Res
 		user.UserID = gothUser.UserID
 		user.Email = gothUser.Email
 		user.Name = gothUser.Name
-	case PROVIDER_UNSAFE:
+	case ProviderUnsafe:
 		username := request.URL.Query().Get("username")
 		if username == "" {
 			writer.Write([]byte("unauthorized"))

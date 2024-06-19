@@ -7,6 +7,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"git.lyonsoftworks.com/jlyon1/auth-proxy-gate/internal/auth"
 	"git.lyonsoftworks.com/jlyon1/auth-proxy-gate/internal/transport"
 	_ "github.com/mattn/go-sqlite3"
 	"go.uber.org/zap"
@@ -70,6 +71,9 @@ var rootCmd = &cobra.Command{
 			Proxy:        proxy,
 			SecretKey:    secretKey,
 			AllowList:    list,
+			Authenticator: &auth.Authenticator{
+				DB: db,
+			},
 
 			DB: db,
 		}

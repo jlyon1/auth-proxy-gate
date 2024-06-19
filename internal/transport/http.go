@@ -9,7 +9,6 @@ import (
 	"git.lyonsoftworks.com/jlyon1/auth-proxy-gate/internal/auth"
 	"git.lyonsoftworks.com/jlyon1/auth-proxy-gate/internal/readable"
 	"git.lyonsoftworks.com/jlyon1/auth-proxy-gate/internal/transport/ui"
-	"git.lyonsoftworks.com/jlyon1/auth-proxy-gate/internal/users"
 	"github.com/a-h/templ"
 	chi "github.com/go-chi/chi/v5"
 	"github.com/gorilla/sessions"
@@ -22,8 +21,6 @@ import (
 	"net/url"
 	"sync"
 	"time"
-
-	bolt "go.etcd.io/bbolt"
 )
 
 type Http struct {
@@ -38,6 +35,7 @@ type Http struct {
 	AllowList    []string `json:"AllowList"`
 
 	DB             *sql.DB // TODO: This struct needs a NewFunc
+	Authenticator  *auth.Authenticator
 	googleProvider *google.Provider
 }
 
@@ -107,55 +105,53 @@ func (h *Http) ListenAndServe(log *zap.SugaredLogger, ctx context.Context) error
 	r.HandleFunc("/*", func(writer http.ResponseWriter, request *http.Request) {
 		ctx := context.Background()
 
-		internalID, err := gothic.GetFromSession(auth.INTERNAL_ID, request)
-
+		userInfo, err := h.Authenticator.GetUserFromSession(request)
 		var components []templ.Component
 
-		if internalID != "" || err == nil {
-			res := h.DB.QueryRow(`SELECT id,email,username FROM accounts WHERE id = ?`, internalID)
-
-			var userInfo users.User
-
-			err := res.Scan(&userInfo.ID, &userInfo.Email, &userInfo.Username)
-
-			if err != nil {
-				log.Error("error querying userdata from db")
-			}
-
-			log.Debug("user is authorized, proxying ", internalID)
-			request.Host = url.Host
-			request.Header.Add("X-Proxy-Authorization", internalID)
-
-			// If no proxy is set, dump the token
-			if h.Proxy == "" {
-				data := struct {
-					UserID string `json:"UserID"`
-					Ident  string `json:"Ident"`
-					Email  string `json:"Email"`
-				}{
-					UserID: internalID,
-					Ident:  fmt.Sprintf("%s/auth/ident", h.RedirectURI),
-					Email:  userInfo.Email,
-				}
-
-				writer.Header().Set("content-type", "application/json")
-				encodedData, _ := json.Marshal(data)
-
-				writer.Write(encodedData)
-				return
-			}
-
-			p.ServeHTTP(writer, request)
-		} else if err != nil || internalID == "" {
-			log.Debugf("user is not authorized, requesting login %s %s", internalID, err)
-			components = append(components, ui.LoginButton("", ""))
-		}
-
-		err = ui.Page("Login", components).Render(ctx, writer)
-
 		if err != nil {
+			log.Debugf("user is not authorized, requesting login %s %s", err)
+			components = append(components, ui.LoginButton("", ""))
+			_ = ui.Page("Login", components).Render(ctx, writer)
+
 			return
 		}
+
+		log.Debug("user is authorized, proxying ", userInfo.ID)
+		request.Host = url.Host
+		request.Header.Add("X-Proxy-Authorization", userInfo.ID)
+
+		// If no proxy is set, dump the token
+		if h.Proxy == "" {
+			data := struct {
+				UserID string `json:"UserID"`
+				Ident  string `json:"Ident"`
+				Email  string `json:"Email"`
+			}{
+				UserID: userInfo.ID,
+				Ident:  fmt.Sprintf("%s/auth/ident", h.RedirectURI),
+				Email:  userInfo.Email,
+			}
+
+			writer.Header().Set("content-type", "application/json")
+			encodedData, _ := json.Marshal(data)
+
+			writer.Write(encodedData)
+			return
+		}
+
+		p.ServeHTTP(writer, request)
+
+	})
+
+	r.Get("/auth/link", func(writer http.ResponseWriter, request *http.Request) {
+		_, err := h.Authenticator.GetUserFromSession(request)
+		if err != nil {
+			log.Error(err)
+			http.Redirect(writer, request, "/", 302)
+			return
+		}
+
+		ui.Page("Link Account", []templ.Component{ui.Link("", "")}).Render(ctx, writer)
 	})
 
 	r.Get("/auth/callback", func(writer http.ResponseWriter, request *http.Request) {
@@ -170,59 +166,33 @@ func (h *Http) ListenAndServe(log *zap.SugaredLogger, ctx context.Context) error
 			return
 		}
 
-		provider := user.Provider
+		link := request.URL.Query().Get("link")
+		if link == "true" {
+			log.Info("Account Linking Flow")
 
-		tx, err := h.DB.BeginTx(ctx, &sql.TxOptions{})
-
-		res := tx.QueryRow(`
-			SELECT 
-			    id, email, username 
-			FROM accounts 
-			    JOIN accounts_providers 
-			ON accounts.id = accounts_providers.account_id 
-			WHERE provider_account_id = ? AND provider_id = ?
-		`, user.UserID, provider)
-
-		var userInfo users.User
-
-		err = res.Scan(&userInfo.ID, &userInfo.Email, &userInfo.Username)
-		if err != nil && !errors.Is(err, sql.ErrNoRows) {
-			log.Error("failed to retrieve value from db ", err)
-			writeInternalError(writer, "failed to retrieve value from db")
-			return
-		} else if errors.Is(err, sql.ErrNoRows) {
-
-			userInfo.Username = user.Name
-			userInfo.Email = user.Email
-
-			token := readable.NewUserID()
-			userInfo.ID = token.String()
-
-			log.Infof("No account for user, creating one. User ID: %s, provider %s", userInfo.ID, provider)
-
-			_, err = tx.Exec(`INSERT INTO accounts (id, username, email) VALUES (?,?,?)`, userInfo.ID, userInfo.Username, userInfo.Email)
-
+			currentUserId, err := gothic.GetFromSession(auth.InternalId, request)
 			if err != nil {
-				log.Error("failed to create account ", err)
-				tx.Rollback()
-				writeInternalError(writer, "error creating account")
+				log.Error(err)
+				http.Redirect(writer, request, "/", 302)
 				return
 			}
 
-			_, err = tx.Exec(`INSERT INTO accounts_providers (provider_id, account_id, provider_account_id) VALUES (?,?,?)`, provider, userInfo.ID, user.UserID)
-
+			err = h.Authenticator.LinkProviderToAccount(ctx, currentUserId, *user)
 			if err != nil {
-				log.Error("error inserting provider link", err)
-				tx.Rollback()
-				writeInternalError(writer, "error creating account")
+				log.Error(err)
+				writeInternalError(writer, "error")
+				return
 			}
 
-			tx.Commit()
-			log.Info("User Created")
+			log.Infof("account linked")
+			http.Redirect(writer, request, "/", 302)
 
+			return
 		}
 
-		err = gothic.StoreInSession(auth.INTERNAL_ID, userInfo.ID, request, writer)
+		userInfo, err := h.Authenticator.CreateNewAccountWithProviderDataOrGetExistingAccount(ctx, *user)
+
+		err = gothic.StoreInSession(auth.InternalId, userInfo.ID, request, writer)
 		if err != nil {
 			log.Error("error storing in auth", err)
 			writeInternalError(writer, "error authorizing account")
@@ -315,81 +285,4 @@ func (h *Http) ListenAndServe(log *zap.SugaredLogger, ctx context.Context) error
 	wg.Wait()
 
 	return nil
-}
-
-func storeAuthDataInBoltFunc(writer http.ResponseWriter, request *http.Request, user goth.User, log *zap.SugaredLogger) func(tx *bolt.Tx) error {
-	return func(tx *bolt.Tx) error {
-		b, err := tx.CreateBucketIfNotExists([]byte("sessions"))
-		if err != nil {
-			return err
-		}
-
-		var tok readable.Token
-
-		userIDKey := []byte(user.UserID)
-		tokenInDB := b.Get(userIDKey)
-
-		if tokenInDB == nil {
-			// Generate a new token and store it
-			token := readable.NewToken()
-
-			log.Debug("Generated internal token for user", token.String(), user.Email)
-
-			err := b.Put(userIDKey, []byte(token.String()))
-			if err != nil {
-				return err
-			}
-
-			tok = token
-		} else {
-			t, err := readable.NewTokenFromString(string(tokenInDB))
-			if err != nil {
-				return err
-			}
-
-			tok = *t
-		}
-
-		err = gothic.StoreInSession("internal_token", tok.String(), request, writer)
-		if err != nil {
-			log.Error("error storing auth field token", err)
-		}
-
-		// At this point we should store the rest of the user data in bolt
-
-		b, err = tx.CreateBucketIfNotExists([]byte("tokens"))
-		if err != nil {
-			return err
-		}
-
-		d, err := json.Marshal(user)
-		if err != nil {
-			return err
-		}
-
-		err = b.Put([]byte(tok.String()), d)
-		if err != nil {
-			return err
-		}
-
-		return nil
-	}
-}
-
-func getUserFromDbFunc(uid string, data goth.User) func(tx *bolt.Tx) error {
-	return func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte("tokens"))
-		if b == nil {
-			return errors.New("unexpected missing bucket")
-		}
-
-		rawData := b.Get([]byte(uid))
-
-		if rawData == nil {
-			return errors.New("unexpected empty user data")
-		}
-
-		return json.Unmarshal(rawData, &data)
-
-	}
 }
