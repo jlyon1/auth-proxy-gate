@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"git.lyonsoftworks.com/jlyon1/auth-proxy-gate/internal/auth"
 	"git.lyonsoftworks.com/jlyon1/auth-proxy-gate/internal/readable"
 	"git.lyonsoftworks.com/jlyon1/auth-proxy-gate/internal/transport/ui"
+	"git.lyonsoftworks.com/jlyon1/auth-proxy-gate/internal/users"
 	"github.com/a-h/templ"
 	chi "github.com/go-chi/chi/v5"
 	"github.com/gorilla/sessions"
@@ -37,17 +39,6 @@ type Http struct {
 
 	DB             *sql.DB // TODO: This struct needs a NewFunc
 	googleProvider *google.Provider
-}
-
-const (
-	PROVIDER_GOOGLE = "google"
-	PROVIDER_UNSAFE = "unsafe"
-)
-
-type UserInfo struct {
-	ID       string
-	Email    string
-	Username string
 }
 
 func (h *Http) ProactiveTokenRefresh(log *zap.SugaredLogger) error {
@@ -116,14 +107,14 @@ func (h *Http) ListenAndServe(log *zap.SugaredLogger, ctx context.Context) error
 	r.HandleFunc("/*", func(writer http.ResponseWriter, request *http.Request) {
 		ctx := context.Background()
 
-		internalID, err := gothic.GetFromSession("internal_id", request)
+		internalID, err := gothic.GetFromSession(auth.INTERNAL_ID, request)
 
 		var components []templ.Component
 
 		if internalID != "" || err == nil {
 			res := h.DB.QueryRow(`SELECT id,email,username FROM accounts WHERE id = ?`, internalID)
 
-			var userInfo UserInfo
+			var userInfo users.User
 
 			err := res.Scan(&userInfo.ID, &userInfo.Email, &userInfo.Username)
 
@@ -168,70 +159,18 @@ func (h *Http) ListenAndServe(log *zap.SugaredLogger, ctx context.Context) error
 	})
 
 	r.Get("/auth/callback", func(writer http.ResponseWriter, request *http.Request) {
-		provider := request.URL.Query().Get("provider")
+		log.Infof("Login Callback called")
 
-		log.Infof("Login Callback with provider %s", provider)
+		user, err := auth.AuthenticateAndGetAuthorizedUserData(request, writer, []auth.Filter{&auth.EmailAllowListFilter{AllowedEmails: h.AllowList}})
 
-		if provider == "" {
-			log.Error("provider cannot be empty")
-			writeInternalError(writer, "invalid provider")
-			return
-		}
-
-		type AuthorizedUserData struct {
-			Email  string
-			UserID string
-			Name   string
-		}
-
-		var user AuthorizedUserData
-
-		switch provider {
-		case PROVIDER_GOOGLE:
-			gothUser, err := gothic.CompleteUserAuth(writer, request)
-			if err != nil {
-				log.Error("error completing user auth", zap.Error(err))
-				writeInternalError(writer, "error completing user auth")
-				return
-			}
-
-			user.UserID = gothUser.UserID
-			user.Email = gothUser.Email
-			user.Name = gothUser.Name
-		case PROVIDER_UNSAFE:
-			log.Info("UNSAFE")
-			username := request.URL.Query().Get("username")
-			if username == "" {
-				log.Info("invalid empty username")
-				writer.Write([]byte("unauthorized"))
-				writer.WriteHeader(401)
-				return
-			}
-
-			user.Email = fmt.Sprintf("%s@example.com", username)
-			user.UserID = username
-			user.Name = username
-
-		}
-
-		found := false
-		for _, entry := range h.AllowList {
-			if entry == user.Email {
-				found = true
-				break
-			}
-		}
-
-		if len(h.AllowList) == 0 {
-			found = true
-		}
-
-		if !found {
-			log.Infof("found not allowed user %s", user.Email)
+		if err != nil {
+			log.Info("user is not authenticated properly ", err)
 			writer.WriteHeader(401)
 			writer.Write([]byte("unauthorized"))
 			return
 		}
+
+		provider := user.Provider
 
 		tx, err := h.DB.BeginTx(ctx, &sql.TxOptions{})
 
@@ -244,7 +183,7 @@ func (h *Http) ListenAndServe(log *zap.SugaredLogger, ctx context.Context) error
 			WHERE provider_account_id = ? AND provider_id = ?
 		`, user.UserID, provider)
 
-		var userInfo UserInfo
+		var userInfo users.User
 
 		err = res.Scan(&userInfo.ID, &userInfo.Email, &userInfo.Username)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
@@ -283,14 +222,14 @@ func (h *Http) ListenAndServe(log *zap.SugaredLogger, ctx context.Context) error
 
 		}
 
-		err = gothic.StoreInSession("internal_id", userInfo.ID, request, writer)
+		err = gothic.StoreInSession(auth.INTERNAL_ID, userInfo.ID, request, writer)
 		if err != nil {
-			log.Error("error storing in session", err)
+			log.Error("error storing in auth", err)
 			writeInternalError(writer, "error authorizing account")
 			return
 		}
 
-		log.Infof("User authorized and info stored in session %s", userInfo.ID)
+		log.Infof("User authorized and info stored in auth %s", userInfo.ID)
 
 		http.Redirect(writer, request, "/", 302)
 
@@ -413,7 +352,7 @@ func storeAuthDataInBoltFunc(writer http.ResponseWriter, request *http.Request, 
 
 		err = gothic.StoreInSession("internal_token", tok.String(), request, writer)
 		if err != nil {
-			log.Error("error storing session field token", err)
+			log.Error("error storing auth field token", err)
 		}
 
 		// At this point we should store the rest of the user data in bolt

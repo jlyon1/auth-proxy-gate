@@ -72,11 +72,11 @@ func NewUserIDFromString(token string) (*UserID, error) {
 }
 
 func (t *UserID) String() string {
-	return fmt.Sprintf("tok-%s", t.uuid.String())
+	return fmt.Sprintf("usr-%s", t.uuid.String())
 }
 
 func (t *Token) String() string {
-	return fmt.Sprintf("usr-%s", t.uuid.String())
+	return fmt.Sprintf("tok-%s", t.uuid.String())
 }
 
 var _ UUID = (*Token)(nil)
