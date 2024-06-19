@@ -39,6 +39,11 @@ type Http struct {
 	googleProvider *google.Provider
 }
 
+const (
+	PROVIDER_GOOGLE = "google"
+	PROVIDER_UNSAFE = "unsafe"
+)
+
 type UserInfo struct {
 	ID       string
 	Email    string
@@ -168,16 +173,45 @@ func (h *Http) ListenAndServe(log *zap.SugaredLogger, ctx context.Context) error
 		log.Infof("Login Callback with provider %s", provider)
 
 		if provider == "" {
-			log.Error("provier cannot be empty")
+			log.Error("provider cannot be empty")
 			writeInternalError(writer, "invalid provider")
 			return
 		}
 
-		user, err := gothic.CompleteUserAuth(writer, request)
-		if err != nil {
-			log.Error("error completing user auth", zap.Error(err))
-			writeInternalError(writer, "error completing user auth")
-			return
+		type AuthorizedUserData struct {
+			Email  string
+			UserID string
+			Name   string
+		}
+
+		var user AuthorizedUserData
+
+		switch provider {
+		case PROVIDER_GOOGLE:
+			gothUser, err := gothic.CompleteUserAuth(writer, request)
+			if err != nil {
+				log.Error("error completing user auth", zap.Error(err))
+				writeInternalError(writer, "error completing user auth")
+				return
+			}
+
+			user.UserID = gothUser.UserID
+			user.Email = gothUser.Email
+			user.Name = gothUser.Name
+		case PROVIDER_UNSAFE:
+			log.Info("UNSAFE")
+			username := request.URL.Query().Get("username")
+			if username == "" {
+				log.Info("invalid empty username")
+				writer.Write([]byte("unauthorized"))
+				writer.WriteHeader(401)
+				return
+			}
+
+			user.Email = fmt.Sprintf("%s@example.com", username)
+			user.UserID = username
+			user.Name = username
+
 		}
 
 		found := false
