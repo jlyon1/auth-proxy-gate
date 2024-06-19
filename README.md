@@ -4,7 +4,7 @@ Upcoming Feature list:
 
 - [x] Login With Google
 - [x] Allow-List
-- [ ] Config File
+- [x] Config File
 - [x] Link Accounts
 - [ ] Structured Logging
 - [ ] Admin Accounts
