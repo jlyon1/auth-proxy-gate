@@ -5,16 +5,16 @@ package cmd
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"git.lyonsoftworks.com/jlyon1/auth-proxy-gate/internal/transport"
-	bolt "go.etcd.io/bbolt"
+	_ "github.com/mattn/go-sqlite3"
 	"go.uber.org/zap"
 	"os"
 	"os/signal"
 	"strings"
 	"sync"
 	"syscall"
-	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -50,12 +50,13 @@ var rootCmd = &cobra.Command{
 			log.Warn("list is empty, all users allowed")
 		}
 
-		db, err := bolt.Open("./sessions.db", 0600, &bolt.Options{Timeout: 1 * time.Second})
+		db, err := sql.Open("sqlite3", "./accounts.db")
 		if err != nil {
-			log.Error("error creating bolt db", err)
+			panic(err)
 		}
 
 		defer db.Close()
+
 		defer func() {
 			log.Info("Graceful shutdown complete")
 		}()
@@ -70,7 +71,7 @@ var rootCmd = &cobra.Command{
 			SecretKey:    secretKey,
 			AllowList:    list,
 
-			DB: *db,
+			DB: db,
 		}
 		wg := sync.WaitGroup{}
 

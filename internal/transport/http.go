@@ -2,6 +2,7 @@ package transport
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -34,47 +35,54 @@ type Http struct {
 	SecretKey    string   `json:"SecretKey"`
 	AllowList    []string `json:"AllowList"`
 
-	DB             bolt.DB // TODO: This struct needs a NewFunc
+	DB             *sql.DB // TODO: This struct needs a NewFunc
 	googleProvider *google.Provider
 }
 
+type UserInfo struct {
+	ID       string
+	Email    string
+	Username string
+}
+
 func (h *Http) ProactiveTokenRefresh(log *zap.SugaredLogger) error {
-	return h.DB.Update(func(tx *bolt.Tx) error {
-		b, err := tx.CreateBucketIfNotExists([]byte("tokens"))
-		if err != nil {
-			return err
-		}
-
-		return b.ForEach(func(k, v []byte) error {
-			var userData goth.User
-
-			err := json.Unmarshal(v, &userData)
-			if err != nil {
-				log.Error("error unmarshalling data for token ", string(k), string(v))
-				return nil
-			}
-
-			if !userData.ExpiresAt.After(time.Now().Add(15 * time.Minute)) {
-				log.Info("refreshing token for user ", string(k))
-
-				authToken, err := h.googleProvider.RefreshToken(userData.RefreshToken)
-				if err != nil {
-					return err
-				}
-
-				userData.AccessToken = authToken.AccessToken
-				userData.RefreshToken = authToken.RefreshToken
-				userData.ExpiresAt = authToken.Expiry
-
-				d, _ := json.Marshal(userData)
-
-				b.Put(k, d)
-
-				log.Info("refreshed user data for user ", string(k), " new expiry is ", userData.ExpiresAt)
-			}
-			return nil
-		})
-	})
+	//return h.DB.Update(func(tx *bolt.Tx) error {
+	//	b, err := tx.CreateBucketIfNotExists([]byte("tokens"))
+	//	if err != nil {
+	//		return err
+	//	}
+	//
+	//	return b.ForEach(func(k, v []byte) error {
+	//		var userData goth.User
+	//
+	//		err := json.Unmarshal(v, &userData)
+	//		if err != nil {
+	//			log.Error("error unmarshalling data for token ", string(k), string(v))
+	//			return nil
+	//		}
+	//
+	//		if !userData.ExpiresAt.After(time.Now().Add(15 * time.Minute)) {
+	//			log.Info("refreshing token for user ", string(k))
+	//
+	//			authToken, err := h.googleProvider.RefreshToken(userData.RefreshToken)
+	//			if err != nil {
+	//				return err
+	//			}
+	//
+	//			userData.AccessToken = authToken.AccessToken
+	//			userData.RefreshToken = authToken.RefreshToken
+	//			userData.ExpiresAt = authToken.Expiry
+	//
+	//			d, _ := json.Marshal(userData)
+	//
+	//			b.Put(k, d)
+	//
+	//			log.Info("refreshed user data for user ", string(k), " new expiry is ", userData.ExpiresAt)
+	//		}
+	//		return nil
+	//	})
+	//})
+	return nil
 }
 
 func (h *Http) ListenAndServe(log *zap.SugaredLogger, ctx context.Context) error {
@@ -103,37 +111,35 @@ func (h *Http) ListenAndServe(log *zap.SugaredLogger, ctx context.Context) error
 	r.HandleFunc("/*", func(writer http.ResponseWriter, request *http.Request) {
 		ctx := context.Background()
 
-		internalToken, err := gothic.GetFromSession("internal_token", request)
-
-		err = h.DB.View(func(tx *bolt.Tx) error {
-			b := tx.Bucket([]byte("tokens"))
-			if b == nil {
-				return errors.New("unexpected missing bucket")
-			}
-
-			rawData := b.Get([]byte(internalToken))
-			if rawData == nil {
-				return errors.New("no session for user")
-			}
-
-			return nil
-		})
+		internalID, err := gothic.GetFromSession("internal_id", request)
 
 		var components []templ.Component
 
-		if internalToken != "" || err == nil {
-			log.Debug("user is authorized, proxying ", internalToken)
+		if internalID != "" || err == nil {
+			res := h.DB.QueryRow(`SELECT id,email,username FROM accounts WHERE id = ?`, internalID)
+
+			var userInfo UserInfo
+
+			err := res.Scan(&userInfo.ID, &userInfo.Email, &userInfo.Username)
+
+			if err != nil {
+				log.Error("error querying userdata from db")
+			}
+
+			log.Debug("user is authorized, proxying ", internalID)
 			request.Host = url.Host
-			request.Header.Add("X-Proxy-Authorization", internalToken)
+			request.Header.Add("X-Proxy-Authorization", internalID)
 
 			// If no proxy is set, dump the token
 			if h.Proxy == "" {
 				data := struct {
-					Token string `json:"Token"`
-					Ident string `json:"Ident"`
+					UserID string `json:"UserID"`
+					Ident  string `json:"Ident"`
+					Email  string `json:"Email"`
 				}{
-					Token: internalToken,
-					Ident: fmt.Sprintf("%s/auth/ident", h.RedirectURI),
+					UserID: internalID,
+					Ident:  fmt.Sprintf("%s/auth/ident", h.RedirectURI),
+					Email:  userInfo.Email,
 				}
 
 				writer.Header().Set("content-type", "application/json")
@@ -144,8 +150,8 @@ func (h *Http) ListenAndServe(log *zap.SugaredLogger, ctx context.Context) error
 			}
 
 			p.ServeHTTP(writer, request)
-		} else if err != nil || internalToken == "" {
-			log.Debug("user is not authorized, requesting login")
+		} else if err != nil || internalID == "" {
+			log.Debugf("user is not authorized, requesting login %s %s", internalID, err)
 			components = append(components, ui.LoginButton("", ""))
 		}
 
@@ -157,6 +163,15 @@ func (h *Http) ListenAndServe(log *zap.SugaredLogger, ctx context.Context) error
 	})
 
 	r.Get("/auth/callback", func(writer http.ResponseWriter, request *http.Request) {
+		provider := request.URL.Query().Get("provider")
+
+		log.Infof("Login Callback with provider %s", provider)
+
+		if provider == "" {
+			log.Error("provier cannot be empty")
+			writeInternalError(writer, "invalid provider")
+			return
+		}
 
 		user, err := gothic.CompleteUserAuth(writer, request)
 		if err != nil {
@@ -184,13 +199,64 @@ func (h *Http) ListenAndServe(log *zap.SugaredLogger, ctx context.Context) error
 			return
 		}
 
-		err = h.DB.Update(storeAuthDataInBoltFunc(writer, request, user, log))
+		tx, err := h.DB.BeginTx(ctx, &sql.TxOptions{})
 
-		if err != nil {
-			log.Error("failed to retrieve value from db", err)
+		res := tx.QueryRow(`
+			SELECT 
+			    id, email, username 
+			FROM accounts 
+			    JOIN accounts_providers 
+			ON accounts.id = accounts_providers.account_id 
+			WHERE provider_account_id = ? AND provider_id = ?
+		`, user.UserID, provider)
+
+		var userInfo UserInfo
+
+		err = res.Scan(&userInfo.ID, &userInfo.Email, &userInfo.Username)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			log.Error("failed to retrieve value from db ", err)
 			writeInternalError(writer, "failed to retrieve value from db")
 			return
+		} else if errors.Is(err, sql.ErrNoRows) {
+
+			userInfo.Username = user.Name
+			userInfo.Email = user.Email
+
+			token := readable.NewUserID()
+			userInfo.ID = token.String()
+
+			log.Infof("No account for user, creating one. User ID: %s, provider %s", userInfo.ID, provider)
+
+			_, err = tx.Exec(`INSERT INTO accounts (id, username, email) VALUES (?,?,?)`, userInfo.ID, userInfo.Username, userInfo.Email)
+
+			if err != nil {
+				log.Error("failed to create account ", err)
+				tx.Rollback()
+				writeInternalError(writer, "error creating account")
+				return
+			}
+
+			_, err = tx.Exec(`INSERT INTO accounts_providers (provider_id, account_id, provider_account_id) VALUES (?,?,?)`, provider, userInfo.ID, user.UserID)
+
+			if err != nil {
+				log.Error("error inserting provider link", err)
+				tx.Rollback()
+				writeInternalError(writer, "error creating account")
+			}
+
+			tx.Commit()
+			log.Info("User Created")
+
 		}
+
+		err = gothic.StoreInSession("internal_id", userInfo.ID, request, writer)
+		if err != nil {
+			log.Error("error storing in session", err)
+			writeInternalError(writer, "error authorizing account")
+			return
+		}
+
+		log.Infof("User authorized and info stored in session %s", userInfo.ID)
 
 		http.Redirect(writer, request, "/", 302)
 
@@ -218,7 +284,7 @@ func (h *Http) ListenAndServe(log *zap.SugaredLogger, ctx context.Context) error
 			return
 		}
 
-		err = h.DB.View(getUserFromDbFunc(uid, data))
+		//err = h.DB.View(getUserFromDbFunc(uid, data))
 
 		if err != nil {
 			log.Error(err)
