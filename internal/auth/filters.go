@@ -1,7 +1,7 @@
 package auth
 
 type Filter interface {
-	Validate(data AuthorizedProviderUserData) bool
+	Validate(data ProviderUserData) bool
 	Name() string
 }
 
@@ -13,7 +13,7 @@ func (a *EmailAllowListFilter) Name() string {
 	return "EmailAllowListFilter"
 }
 
-func (a *EmailAllowListFilter) Validate(data AuthorizedProviderUserData) bool {
+func (a *EmailAllowListFilter) Validate(data ProviderUserData) bool {
 	found := false
 
 	for _, entry := range a.AllowedEmails {

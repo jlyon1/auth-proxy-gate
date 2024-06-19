@@ -7,12 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"git.lyonsoftworks.com/jlyon1/auth-proxy-gate/internal/auth"
-	"git.lyonsoftworks.com/jlyon1/auth-proxy-gate/internal/readable"
 	"git.lyonsoftworks.com/jlyon1/auth-proxy-gate/internal/transport/ui"
+	"git.lyonsoftworks.com/jlyon1/auth-proxy-gate/internal/users"
 	"github.com/a-h/templ"
 	chi "github.com/go-chi/chi/v5"
-	"github.com/markbates/goth"
-	"github.com/markbates/goth/gothic"
 	"go.uber.org/zap"
 	"net/http"
 	"net/http/httputil"
@@ -31,7 +29,7 @@ type Http struct {
 	AllowList    []string `json:"AllowList"`
 
 	DB            *sql.DB // TODO: This struct needs a NewFunc
-	Authenticator *auth.Authenticator
+	Authenticator *auth.UserSessionManager
 }
 
 func (h *Http) ProactiveTokenRefresh(log *zap.SugaredLogger) error {
@@ -48,7 +46,7 @@ func (h *Http) ListenAndServe(log *zap.SugaredLogger, ctx context.Context) error
 	r.HandleFunc("/*", func(writer http.ResponseWriter, request *http.Request) {
 		ctx := context.Background()
 
-		userInfo, err := h.Authenticator.GetUserFromSession(request)
+		userInfo, err := h.Authenticator.GetExistingUserFromSession(request)
 		var components []templ.Component
 
 		if err != nil {
@@ -87,7 +85,7 @@ func (h *Http) ListenAndServe(log *zap.SugaredLogger, ctx context.Context) error
 	})
 
 	r.Get("/auth/link", func(writer http.ResponseWriter, request *http.Request) {
-		_, err := h.Authenticator.GetUserFromSession(request)
+		_, err := h.Authenticator.GetExistingUserFromSession(request)
 		if err != nil {
 			log.Error(err)
 			http.Redirect(writer, request, "/", 302)
@@ -100,7 +98,7 @@ func (h *Http) ListenAndServe(log *zap.SugaredLogger, ctx context.Context) error
 	r.Get("/auth/callback", func(writer http.ResponseWriter, request *http.Request) {
 		log.Infof("Login Callback called")
 
-		user, err := auth.AuthenticateAndGetAuthorizedUserData(request, writer, []auth.Filter{&auth.EmailAllowListFilter{AllowedEmails: h.AllowList}})
+		user, err := h.Authenticator.AuthenticateAndGetAuthorizedUserData(request, writer, []auth.Filter{&auth.EmailAllowListFilter{AllowedEmails: h.AllowList}})
 
 		if err != nil {
 			log.Info("user is not authenticated properly ", err)
@@ -109,21 +107,51 @@ func (h *Http) ListenAndServe(log *zap.SugaredLogger, ctx context.Context) error
 			return
 		}
 
+		state := request.URL.Query().Get("state")
+
+		ls := auth.LinkState{}
+		err = ls.Decode(state)
+
+		if err != nil {
+			log.Info("no link state on request", err)
+		}
+
 		link := request.URL.Query().Get("link")
-		if link == "true" {
+		if link == "true" || ls.Link {
 			log.Info("Account Linking Flow")
 
-			currentUserId, err := gothic.GetFromSession(auth.InternalId, request)
-			if err != nil {
-				log.Error(err)
-				http.Redirect(writer, request, "/", 302)
-				return
+			var currentUser *users.User
+
+			if ls.AccountId != "" {
+				log.Info("using account id from state")
+				currentUser, err = h.Authenticator.GetExistingUserByID(ls.AccountId)
+				if err != nil {
+					log.Error(err)
+					http.Redirect(writer, request, "/", 302)
+					return
+				}
+			} else {
+				log.Info("using account id from session")
+				currentUser, err = h.Authenticator.GetExistingUserFromSession(request)
+				if err != nil {
+					log.Error(err)
+					http.Redirect(writer, request, "/", 302)
+					return
+				}
+
 			}
 
-			err = h.Authenticator.LinkProviderToAccount(ctx, currentUserId, *user)
+			err = h.Authenticator.LinkProviderToAccount(ctx, currentUser.ID, *user)
 			if err != nil {
 				log.Error(err)
 				writeInternalError(writer, "error")
+				return
+			}
+
+			err = h.Authenticator.PersistUserToSession(*currentUser, request, writer)
+			if err != nil {
+				log.Error("error storing in auth", err)
+				writeInternalError(writer, "error authorizing account")
 				return
 			}
 
@@ -133,9 +161,14 @@ func (h *Http) ListenAndServe(log *zap.SugaredLogger, ctx context.Context) error
 			return
 		}
 
-		userInfo, err := h.Authenticator.CreateNewAccountWithProviderDataOrGetExistingAccount(ctx, *user)
+		userInfo, err := h.Authenticator.CreateNewOrGetExistingAccountAccountWithProviderData(ctx, *user)
+		if err != nil {
+			log.Error("error creating an account", err)
+			writeInternalError(writer, "error authorizing account")
+			return
+		}
 
-		err = gothic.StoreInSession(auth.InternalId, userInfo.ID, request, writer)
+		err = h.Authenticator.PersistUserToSession(*userInfo, request, writer)
 		if err != nil {
 			log.Error("error storing in auth", err)
 			writeInternalError(writer, "error authorizing account")
@@ -152,37 +185,21 @@ func (h *Http) ListenAndServe(log *zap.SugaredLogger, ctx context.Context) error
 	})
 
 	r.Get("/auth", func(res http.ResponseWriter, req *http.Request) {
-		gothic.BeginAuthHandler(res, req)
-	})
-
-	r.Get("/auth/ident", func(res http.ResponseWriter, req *http.Request) {
-
-		var data goth.User
-
-		uid := req.Header.Get("Authorization")
-
-		log.Info("got user id from request ", uid)
-
-		_, err := readable.NewTokenFromString(uid)
-		if err != nil {
-			log.Error("token in bad format ", err)
-			res.WriteHeader(http.StatusUnauthorized)
-			return
+		user, err := h.Authenticator.GetExistingUserFromSession(req)
+		ls := auth.LinkState{}
+		if err == nil {
+			fmt.Printf("user %s is linking", user.ID)
+			ls.Link = true
+			ls.AccountId = user.ID
 		}
 
-		//err = h.DB.View(getUserFromDbFunc(uid, data))
+		encoded, _ := ls.Encode()
 
-		if err != nil {
-			log.Error(err)
-			writeInternalError(res, "failed to read user data")
-			return
-		}
+		// Overwrite the state with the link state, so we can decode it later
+		req.URL.RawQuery = req.URL.RawQuery + "&state=" + encoded
 
-		d, _ := json.Marshal(data)
+		h.Authenticator.BeginAuthFlow(req, res)
 
-		res.Header().Set("content-type", "application/json")
-
-		res.Write(d)
 	})
 
 	log.Infof("Listening on %s", h.ListenURL)

@@ -6,11 +6,11 @@ Upcoming Feature list:
 - [x] Allow-List
 - [x] Config File
 - [x] Link Accounts
-- [ ] Structured Logging
 - [ ] Admin Accounts
+- [ ] Token Validation (For downstream services)
+- [ ] Structured Logging
 - [ ] CRUD Accounts
 - [ ] Login With Facebook
 - [ ] Login With Twitch
 - [ ] Login With GitHub
 - [ ] User Analytics
-- [ ] Token Validation (For downstream services)

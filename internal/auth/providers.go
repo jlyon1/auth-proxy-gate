@@ -5,9 +5,9 @@ const (
 	ProviderUnsafe = "unsafe"
 )
 
-// AuthorizedProviderUserData represents authorized user data from a provider
+// ProviderUserData represents authorized user data from a provider
 // it can be used to create an account or link to an existing one
-type AuthorizedProviderUserData struct {
+type ProviderUserData struct {
 	Provider string
 	Email    string
 	UserID   string

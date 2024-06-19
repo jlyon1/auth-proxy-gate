@@ -1,8 +1,12 @@
 package auth
 
 import (
+	"bytes"
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"git.lyonsoftworks.com/jlyon1/auth-proxy-gate/internal/readable"
@@ -12,7 +16,9 @@ import (
 	"github.com/markbates/goth/gothic"
 	"github.com/markbates/goth/providers/google"
 	"go.uber.org/zap"
+	"io"
 	"net/http"
+	"strings"
 )
 
 const (
@@ -26,11 +32,11 @@ func init() {
 	log = logger.Sugar()
 }
 
-type Authenticator struct {
+type UserSessionManager struct {
 	DB *sql.DB
 }
 
-func (a *Authenticator) Shutdown() {
+func (a *UserSessionManager) Shutdown() {
 	a.DB.Close()
 }
 
@@ -49,7 +55,7 @@ type AuthenticatorConfig struct {
 	} `json:"ProviderConfigs,omitempty"`
 }
 
-func NewAuthenticator(config AuthenticatorConfig) (*Authenticator, error) {
+func NewAuthenticator(config AuthenticatorConfig) (*UserSessionManager, error) {
 	store := sessions.NewCookieStore([]byte(config.SecretKey))
 	store.MaxAge(config.MaxAge)
 	store.Options.Path = "/"
@@ -63,7 +69,7 @@ func NewAuthenticator(config AuthenticatorConfig) (*Authenticator, error) {
 		panic(err)
 	}
 
-	var a Authenticator
+	var a UserSessionManager
 
 	var providers []goth.Provider
 
@@ -84,7 +90,27 @@ func NewAuthenticator(config AuthenticatorConfig) (*Authenticator, error) {
 	return &a, nil
 }
 
-func (a *Authenticator) GetUserFromSession(request *http.Request) (*users.User, error) {
+// GetExistingUserFromSession takes a request and returns an existing user if it already exists, if one does not exist it returns an error
+func (a *UserSessionManager) GetExistingUserByID(id string) (*users.User, error) {
+
+	if id == "" {
+		return nil, errors.New("invalid empty id")
+	}
+
+	res := a.DB.QueryRow(`SELECT id,email,username FROM accounts WHERE id = ?`, id)
+
+	var userInfo users.User
+	err := res.Scan(&userInfo.ID, &userInfo.Email, &userInfo.Username)
+
+	if err != nil {
+		return nil, err
+	}
+
+	return &userInfo, nil
+}
+
+// GetExistingUserFromSession takes a request and returns an existing user if it already exists, if one does not exist it returns an error
+func (a *UserSessionManager) GetExistingUserFromSession(request *http.Request) (*users.User, error) {
 	internalID, err := gothic.GetFromSession(InternalId, request)
 	if err != nil {
 		return nil, err
@@ -106,7 +132,7 @@ func (a *Authenticator) GetUserFromSession(request *http.Request) (*users.User, 
 	return &userInfo, nil
 }
 
-func (a *Authenticator) CreateNewAccountWithProviderDataOrGetExistingAccount(ctx context.Context, user AuthorizedProviderUserData) (*users.User, error) {
+func (a *UserSessionManager) CreateNewOrGetExistingAccountAccountWithProviderData(ctx context.Context, user ProviderUserData) (*users.User, error) {
 	// Once we have gotten the user's login provider data, we can query the database for the user based on their provider info
 	tx, err := a.DB.BeginTx(ctx, &sql.TxOptions{})
 
@@ -159,7 +185,48 @@ func (a *Authenticator) CreateNewAccountWithProviderDataOrGetExistingAccount(ctx
 	return &userInfo, nil
 }
 
-func (a *Authenticator) LinkProviderToAccount(ctx context.Context, accountID string, provider AuthorizedProviderUserData) error {
+type LinkState struct {
+	Link      bool   `json:"Link,omitempty"`
+	AccountId string `json:"AccountId"`
+	Rand      []byte `json:"Rand,omitempty"`
+}
+
+func (l *LinkState) randomize() {
+	nonceBytes := make([]byte, 50)
+	_, err := io.ReadFull(rand.Reader, nonceBytes)
+	if err != nil {
+		panic("gothic: source of randomness unavailable: " + err.Error())
+	}
+	l.Rand = nonceBytes
+}
+
+func (l *LinkState) Encode() (string, error) {
+	l.randomize()
+
+	var buf bytes.Buffer
+	encoder := base64.NewEncoder(base64.StdEncoding, &buf)
+	err := json.NewEncoder(encoder).Encode(l)
+	if err != nil {
+		return "", err
+	}
+
+	return buf.String(), nil
+}
+
+func (l *LinkState) Decode(source string) error {
+	return json.NewDecoder(base64.NewDecoder(base64.StdEncoding, strings.NewReader(source))).Decode(l)
+}
+
+func (a *UserSessionManager) BeginAuthFlow(request *http.Request, writer http.ResponseWriter) {
+	gothic.BeginAuthHandler(writer, request)
+}
+
+func (a *UserSessionManager) PersistUserToSession(user users.User, request *http.Request, writer http.ResponseWriter) error {
+	return gothic.StoreInSession(InternalId, user.ID, request, writer)
+}
+
+// LinkProviderToAccount takes an account id and provider user data and links the provider user data to the account.
+func (a *UserSessionManager) LinkProviderToAccount(ctx context.Context, accountID string, provider ProviderUserData) error {
 	tx, err := a.DB.BeginTx(ctx, &sql.TxOptions{})
 
 	if err != nil {
@@ -177,10 +244,10 @@ func (a *Authenticator) LinkProviderToAccount(ctx context.Context, accountID str
 	return nil
 }
 
-func AuthenticateAndGetAuthorizedUserData(request *http.Request, writer http.ResponseWriter, filters []Filter) (*AuthorizedProviderUserData, error) {
+func (a *UserSessionManager) AuthenticateAndGetAuthorizedUserData(request *http.Request, writer http.ResponseWriter, filters []Filter) (*ProviderUserData, error) {
 	provider := request.URL.Query().Get("provider")
 
-	var user AuthorizedProviderUserData
+	var user ProviderUserData
 
 	if provider == "" {
 		return nil, errors.New("provider must not be empty")
