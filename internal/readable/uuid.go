@@ -41,8 +41,43 @@ func NewTokenFromString(token string) (*Token, error) {
 	return &tok, nil
 }
 
+// UserID ...
+type UserID struct {
+	uuid uuid.UUID
+}
+
+// NewToken generates a new readable token
+func NewUserID() UserID {
+	var tok UserID
+
+	tok.uuid = uuid.New()
+
+	return tok
+}
+
+func NewUserIDFromString(token string) (*UserID, error) {
+	var tok UserID
+
+	if token[0:4] != "usr-" {
+		return nil, errors.New("user ids must start with usr-, token is invalid")
+	} else {
+		uuid, err := uuid.Parse(token[4:])
+		if err != nil {
+			return nil, err
+		}
+		tok.uuid = uuid
+	}
+
+	return &tok, nil
+}
+
+func (t *UserID) String() string {
+	return fmt.Sprintf("usr-%s", t.uuid.String())
+}
+
 func (t *Token) String() string {
 	return fmt.Sprintf("tok-%s", t.uuid.String())
 }
 
 var _ UUID = (*Token)(nil)
+var _ UUID = (*UserID)(nil)

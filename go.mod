@@ -8,6 +8,7 @@ require (
 	github.com/google/uuid v1.4.0
 	github.com/gorilla/sessions v1.1.1
 	github.com/markbates/goth v1.79.0
+	github.com/mattn/go-sqlite3 v1.14.22
 	github.com/spf13/cobra v1.8.0
 	github.com/spf13/viper v1.18.2
 	go.etcd.io/bbolt v1.3.10

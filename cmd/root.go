@@ -5,20 +5,25 @@ package cmd
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
+	"git.lyonsoftworks.com/jlyon1/auth-proxy-gate/internal/auth"
 	"git.lyonsoftworks.com/jlyon1/auth-proxy-gate/internal/transport"
-	bolt "go.etcd.io/bbolt"
+	_ "github.com/mattn/go-sqlite3"
 	"go.uber.org/zap"
 	"os"
 	"os/signal"
 	"strings"
 	"sync"
 	"syscall"
-	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
+
+type AppConfig struct {
+	AuthenticatorConfig auth.AuthenticatorConfig `json:"AuthenticatorConfig"`
+}
 
 // rootCmd represents the base command when called without any subcommands
 var rootCmd = &cobra.Command{
@@ -28,6 +33,19 @@ var rootCmd = &cobra.Command{
 	// Uncomment the following line if your bare application
 	// has an action associated with it:
 	Run: func(cmd *cobra.Command, args []string) {
+		var cfg AppConfig
+
+		err := viper.ReadInConfig()
+		if err != nil {
+			panic("config not found") //TODO fix error handling here
+		}
+
+		err = viper.Unmarshal(&cfg)
+		if err != nil {
+			panic(err)
+		}
+
+		fmt.Println(cfg)
 
 		host := viper.GetString("host")
 		port := viper.GetInt32("port")
@@ -50,12 +68,13 @@ var rootCmd = &cobra.Command{
 			log.Warn("list is empty, all users allowed")
 		}
 
-		db, err := bolt.Open("./sessions.db", 0600, &bolt.Options{Timeout: 1 * time.Second})
+		db, err := sql.Open("sqlite3", "./accounts.db")
 		if err != nil {
-			log.Error("error creating bolt db", err)
+			panic(err)
 		}
 
 		defer db.Close()
+
 		defer func() {
 			log.Info("Graceful shutdown complete")
 		}()
@@ -69,8 +88,11 @@ var rootCmd = &cobra.Command{
 			Proxy:        proxy,
 			SecretKey:    secretKey,
 			AllowList:    list,
+			Authenticator: &auth.Authenticator{
+				DB: db,
+			},
 
-			DB: *db,
+			DB: db,
 		}
 		wg := sync.WaitGroup{}
 
@@ -145,4 +167,7 @@ func init() {
 
 	rootCmd.Flags().String("allowList", "", "Allow List")
 	viper.BindPFlag("allowList", rootCmd.Flags().Lookup("allowList"))
+
+	viper.AddConfigPath(".")
+	viper.SetConfigFile("config.json")
 }

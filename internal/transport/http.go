@@ -2,9 +2,11 @@ package transport
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"git.lyonsoftworks.com/jlyon1/auth-proxy-gate/internal/auth"
 	"git.lyonsoftworks.com/jlyon1/auth-proxy-gate/internal/readable"
 	"git.lyonsoftworks.com/jlyon1/auth-proxy-gate/internal/transport/ui"
 	"github.com/a-h/templ"
@@ -19,8 +21,6 @@ import (
 	"net/url"
 	"sync"
 	"time"
-
-	bolt "go.etcd.io/bbolt"
 )
 
 type Http struct {
@@ -34,47 +34,14 @@ type Http struct {
 	SecretKey    string   `json:"SecretKey"`
 	AllowList    []string `json:"AllowList"`
 
-	DB             bolt.DB // TODO: This struct needs a NewFunc
+	DB             *sql.DB // TODO: This struct needs a NewFunc
+	Authenticator  *auth.Authenticator
 	googleProvider *google.Provider
 }
 
 func (h *Http) ProactiveTokenRefresh(log *zap.SugaredLogger) error {
-	return h.DB.Update(func(tx *bolt.Tx) error {
-		b, err := tx.CreateBucketIfNotExists([]byte("tokens"))
-		if err != nil {
-			return err
-		}
 
-		return b.ForEach(func(k, v []byte) error {
-			var userData goth.User
-
-			err := json.Unmarshal(v, &userData)
-			if err != nil {
-				log.Error("error unmarshalling data for token ", string(k), string(v))
-				return nil
-			}
-
-			if !userData.ExpiresAt.After(time.Now().Add(15 * time.Minute)) {
-				log.Info("refreshing token for user ", string(k))
-
-				authToken, err := h.googleProvider.RefreshToken(userData.RefreshToken)
-				if err != nil {
-					return err
-				}
-
-				userData.AccessToken = authToken.AccessToken
-				userData.RefreshToken = authToken.RefreshToken
-				userData.ExpiresAt = authToken.Expiry
-
-				d, _ := json.Marshal(userData)
-
-				b.Put(k, d)
-
-				log.Info("refreshed user data for user ", string(k), " new expiry is ", userData.ExpiresAt)
-			}
-			return nil
-		})
-	})
+	return nil
 }
 
 func (h *Http) ListenAndServe(log *zap.SugaredLogger, ctx context.Context) error {
@@ -103,94 +70,101 @@ func (h *Http) ListenAndServe(log *zap.SugaredLogger, ctx context.Context) error
 	r.HandleFunc("/*", func(writer http.ResponseWriter, request *http.Request) {
 		ctx := context.Background()
 
-		internalToken, err := gothic.GetFromSession("internal_token", request)
-
-		err = h.DB.View(func(tx *bolt.Tx) error {
-			b := tx.Bucket([]byte("tokens"))
-			if b == nil {
-				return errors.New("unexpected missing bucket")
-			}
-
-			rawData := b.Get([]byte(internalToken))
-			if rawData == nil {
-				return errors.New("no session for user")
-			}
-
-			return nil
-		})
-
+		userInfo, err := h.Authenticator.GetUserFromSession(request)
 		var components []templ.Component
 
-		if internalToken != "" || err == nil {
-			log.Debug("user is authorized, proxying ", internalToken)
-			request.Host = url.Host
-			request.Header.Add("X-Proxy-Authorization", internalToken)
-
-			// If no proxy is set, dump the token
-			if h.Proxy == "" {
-				data := struct {
-					Token string `json:"Token"`
-					Ident string `json:"Ident"`
-				}{
-					Token: internalToken,
-					Ident: fmt.Sprintf("%s/auth/ident", h.RedirectURI),
-				}
-
-				writer.Header().Set("content-type", "application/json")
-				encodedData, _ := json.Marshal(data)
-
-				writer.Write(encodedData)
-				return
-			}
-
-			p.ServeHTTP(writer, request)
-		} else if err != nil || internalToken == "" {
-			log.Debug("user is not authorized, requesting login")
-			components = append(components, ui.LoginButton("", ""))
-		}
-
-		err = ui.Page("Login", components).Render(ctx, writer)
-
 		if err != nil {
+			log.Debugf("user is not authorized, requesting login %s %s", err)
+			components = append(components, ui.LoginButton("", ""))
+			_ = ui.Page("Login", components).Render(ctx, writer)
+
 			return
 		}
+
+		log.Debug("user is authorized, proxying ", userInfo.ID)
+		request.Host = url.Host
+		request.Header.Add("X-Proxy-Authorization", userInfo.ID)
+
+		// If no proxy is set, dump the token
+		if h.Proxy == "" {
+			data := struct {
+				UserID string `json:"UserID"`
+				Ident  string `json:"Ident"`
+				Email  string `json:"Email"`
+			}{
+				UserID: userInfo.ID,
+				Ident:  fmt.Sprintf("%s/auth/ident", h.RedirectURI),
+				Email:  userInfo.Email,
+			}
+
+			writer.Header().Set("content-type", "application/json")
+			encodedData, _ := json.Marshal(data)
+
+			writer.Write(encodedData)
+			return
+		}
+
+		p.ServeHTTP(writer, request)
+
+	})
+
+	r.Get("/auth/link", func(writer http.ResponseWriter, request *http.Request) {
+		_, err := h.Authenticator.GetUserFromSession(request)
+		if err != nil {
+			log.Error(err)
+			http.Redirect(writer, request, "/", 302)
+			return
+		}
+
+		ui.Page("Link Account", []templ.Component{ui.Link("", "")}).Render(ctx, writer)
 	})
 
 	r.Get("/auth/callback", func(writer http.ResponseWriter, request *http.Request) {
+		log.Infof("Login Callback called")
 
-		user, err := gothic.CompleteUserAuth(writer, request)
+		user, err := auth.AuthenticateAndGetAuthorizedUserData(request, writer, []auth.Filter{&auth.EmailAllowListFilter{AllowedEmails: h.AllowList}})
+
 		if err != nil {
-			log.Error("error completing user auth", zap.Error(err))
-			writeInternalError(writer, "error completing user auth")
-			return
-		}
-
-		found := false
-		for _, entry := range h.AllowList {
-			if entry == user.Email {
-				found = true
-				break
-			}
-		}
-
-		if len(h.AllowList) == 0 {
-			found = true
-		}
-
-		if !found {
-			log.Infof("found not allowed user %s", user.Email)
+			log.Info("user is not authenticated properly ", err)
 			writer.WriteHeader(401)
 			writer.Write([]byte("unauthorized"))
 			return
 		}
 
-		err = h.DB.Update(storeAuthDataInBoltFunc(writer, request, user, log))
+		link := request.URL.Query().Get("link")
+		if link == "true" {
+			log.Info("Account Linking Flow")
 
-		if err != nil {
-			log.Error("failed to retrieve value from db", err)
-			writeInternalError(writer, "failed to retrieve value from db")
+			currentUserId, err := gothic.GetFromSession(auth.InternalId, request)
+			if err != nil {
+				log.Error(err)
+				http.Redirect(writer, request, "/", 302)
+				return
+			}
+
+			err = h.Authenticator.LinkProviderToAccount(ctx, currentUserId, *user)
+			if err != nil {
+				log.Error(err)
+				writeInternalError(writer, "error")
+				return
+			}
+
+			log.Infof("account linked")
+			http.Redirect(writer, request, "/", 302)
+
 			return
 		}
+
+		userInfo, err := h.Authenticator.CreateNewAccountWithProviderDataOrGetExistingAccount(ctx, *user)
+
+		err = gothic.StoreInSession(auth.InternalId, userInfo.ID, request, writer)
+		if err != nil {
+			log.Error("error storing in auth", err)
+			writeInternalError(writer, "error authorizing account")
+			return
+		}
+
+		log.Infof("User authorized and info stored in auth %s", userInfo.ID)
 
 		http.Redirect(writer, request, "/", 302)
 
@@ -218,7 +192,7 @@ func (h *Http) ListenAndServe(log *zap.SugaredLogger, ctx context.Context) error
 			return
 		}
 
-		err = h.DB.View(getUserFromDbFunc(uid, data))
+		//err = h.DB.View(getUserFromDbFunc(uid, data))
 
 		if err != nil {
 			log.Error(err)
@@ -276,81 +250,4 @@ func (h *Http) ListenAndServe(log *zap.SugaredLogger, ctx context.Context) error
 	wg.Wait()
 
 	return nil
-}
-
-func storeAuthDataInBoltFunc(writer http.ResponseWriter, request *http.Request, user goth.User, log *zap.SugaredLogger) func(tx *bolt.Tx) error {
-	return func(tx *bolt.Tx) error {
-		b, err := tx.CreateBucketIfNotExists([]byte("sessions"))
-		if err != nil {
-			return err
-		}
-
-		var tok readable.Token
-
-		userIDKey := []byte(user.UserID)
-		tokenInDB := b.Get(userIDKey)
-
-		if tokenInDB == nil {
-			// Generate a new token and store it
-			token := readable.NewToken()
-
-			log.Debug("Generated internal token for user", token.String(), user.Email)
-
-			err := b.Put(userIDKey, []byte(token.String()))
-			if err != nil {
-				return err
-			}
-
-			tok = token
-		} else {
-			t, err := readable.NewTokenFromString(string(tokenInDB))
-			if err != nil {
-				return err
-			}
-
-			tok = *t
-		}
-
-		err = gothic.StoreInSession("internal_token", tok.String(), request, writer)
-		if err != nil {
-			log.Error("error storing session field token", err)
-		}
-
-		// At this point we should store the rest of the user data in bolt
-
-		b, err = tx.CreateBucketIfNotExists([]byte("tokens"))
-		if err != nil {
-			return err
-		}
-
-		d, err := json.Marshal(user)
-		if err != nil {
-			return err
-		}
-
-		err = b.Put([]byte(tok.String()), d)
-		if err != nil {
-			return err
-		}
-
-		return nil
-	}
-}
-
-func getUserFromDbFunc(uid string, data goth.User) func(tx *bolt.Tx) error {
-	return func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte("tokens"))
-		if b == nil {
-			return errors.New("unexpected missing bucket")
-		}
-
-		rawData := b.Get([]byte(uid))
-
-		if rawData == nil {
-			return errors.New("unexpected empty user data")
-		}
-
-		return json.Unmarshal(rawData, &data)
-
-	}
 }
